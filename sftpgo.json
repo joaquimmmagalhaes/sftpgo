@@ -199,6 +199,7 @@
     "web_root": "",
     "certificate_file": "",
     "certificate_key_file": "",
+    "jwt_sign_key": "dummy_jwt_key",
     "ca_certificates": [],
     "ca_revocation_lists": []
   },

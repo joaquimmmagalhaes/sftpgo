@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/lestrrat-go/jwx/jwa"
 	"log"
 	"net"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/jwtauth/v5"
 	"github.com/go-chi/render"
-	"github.com/lestrrat-go/jwx/jwa"
 	"github.com/rs/xid"
 
 	"github.com/drakkan/sftpgo/common"
@@ -39,12 +39,14 @@ type httpdServer struct {
 	tokenAuth       *jwtauth.JWTAuth
 }
 
-func newHttpdServer(b Binding, staticFilesPath string) *httpdServer {
+func newHttpdServer(b Binding, staticFilesPath string, jwtSignKey string) *httpdServer {
+	fmt.Println(jwtSignKey)
 	return &httpdServer{
 		binding:         b,
 		staticFilesPath: staticFilesPath,
 		enableWebAdmin:  b.EnableWebAdmin,
 		enableWebClient: b.EnableWebClient,
+		tokenAuth:       jwtauth.New(jwa.HS256.String(), []byte(jwtSignKey), nil),
 	}
 }
 
@@ -457,7 +459,6 @@ func (s *httpdServer) redirectToWebPath(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *httpdServer) initializeRouter() {
-	s.tokenAuth = jwtauth.New(jwa.HS256.String(), utils.GenerateRandomBytes(32), nil)
 	s.router = chi.NewRouter()
 
 	s.router.Use(middleware.RequestID)

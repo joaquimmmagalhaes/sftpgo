@@ -244,6 +244,7 @@ func Init() {
 			StaticFilesPath:    "static",
 			BackupsPath:        "backups",
 			WebRoot:            "",
+			JwtSignKey:         "dummy",
 			CertificateFile:    "",
 			CertificateKeyFile: "",
 			CACertificates:     nil,
@@ -1020,6 +1021,7 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)
 	viper.SetDefault("httpd.backups_path", globalConf.HTTPDConfig.BackupsPath)
 	viper.SetDefault("httpd.web_root", globalConf.HTTPDConfig.WebRoot)
+	viper.SetDefault("httpd.jwt_sign_key", globalConf.HTTPDConfig.JwtSignKey)
 	viper.SetDefault("httpd.certificate_file", globalConf.HTTPDConfig.CertificateFile)
 	viper.SetDefault("httpd.certificate_key_file", globalConf.HTTPDConfig.CertificateKeyFile)
 	viper.SetDefault("httpd.ca_certificates", globalConf.HTTPDConfig.CACertificates)

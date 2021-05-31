@@ -224,6 +224,8 @@ type Conf struct {
 	// Defines a base URL for the web admin and client interfaces. If empty web admin and client resources will
 	// be available at the root ("/") URI. If defined it must be an absolute URI or it will be ignored.
 	WebRoot string `json:"web_root" mapstructure:"web_root"`
+	// Jwt sign key for the api token and web admin cookie
+	JwtSignKey string `json:"jwt_sign_key" mapstructure:"jwt_sign_key"`
 	// If files containing a certificate and matching private key for the server are provided the server will expect
 	// HTTPS connections.
 	// Certificate and key files can be reloaded on demand sending a "SIGHUP" signal on Unix based systems and a
@@ -321,7 +323,7 @@ func (c *Conf) Initialize(configDir string) error {
 		certMgr = mgr
 	}
 
-	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), utils.GenerateRandomBytes(32), nil)
+	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), []byte(c.JwtSignKey), nil)
 
 	exitChannel := make(chan error, 1)
 
@@ -334,7 +336,7 @@ func (c *Conf) Initialize(configDir string) error {
 		}
 
 		go func(b Binding) {
-			server := newHttpdServer(b, staticFilesPath)
+			server := newHttpdServer(b, staticFilesPath, c.JwtSignKey)
 
 			exitChannel <- server.listenAndServe()
 		}(binding)
@@ -461,7 +463,7 @@ func GetHTTPRouter() http.Handler {
 		EnableWebAdmin:  true,
 		EnableWebClient: true,
 	}
-	server := newHttpdServer(b, "../static")
+	server := newHttpdServer(b, "../static", "test")
 	server.initializeRouter()
 	return server.router
 }
