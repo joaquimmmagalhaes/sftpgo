@@ -40,7 +40,6 @@ type httpdServer struct {
 }
 
 func newHttpdServer(b Binding, staticFilesPath string, jwtSignKey string) *httpdServer {
-	fmt.Println(jwtSignKey)
 	return &httpdServer{
 		binding:         b,
 		staticFilesPath: staticFilesPath,
