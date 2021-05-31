@@ -217,6 +217,7 @@ func Init() {
 			TemplatesPath:      "templates",
 			StaticFilesPath:    "static",
 			BackupsPath:        "backups",
+			JwtSignKey:         "",
 			CertificateFile:    "",
 			CertificateKeyFile: "",
 		},
@@ -440,6 +441,9 @@ func LoadConfig(configDir, configFile string) error {
 		globalConf.ProviderConf.CredentialsPath = "credentials"
 		logger.Warn(logSender, "", "Configuration error: %v", warn)
 		logger.WarnToConsole("Configuration error: %v", warn)
+	}
+	if strings.TrimSpace(globalConf.HTTPDConfig.JwtSignKey) == "" {
+		globalConf.HTTPDConfig.JwtSignKey = string(utils.GenerateRandomBytes(32))
 	}
 	checkHostKeyCompatibility()
 	logger.Debug(logSender, "", "config file used: '%#v', config loaded: %+v", viper.ConfigFileUsed(), getRedactedGlobalConf())
@@ -894,6 +898,7 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.templates_path", globalConf.HTTPDConfig.TemplatesPath)
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)
 	viper.SetDefault("httpd.backups_path", globalConf.HTTPDConfig.BackupsPath)
+	viper.SetDefault("httpd.jwt_sign_key", globalConf.HTTPDConfig.JwtSignKey)
 	viper.SetDefault("httpd.certificate_file", globalConf.HTTPDConfig.CertificateFile)
 	viper.SetDefault("httpd.certificate_key_file", globalConf.HTTPDConfig.CertificateKeyFile)
 	viper.SetDefault("httpd.ca_certificates", globalConf.HTTPDConfig.CACertificates)

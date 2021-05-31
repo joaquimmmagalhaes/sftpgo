@@ -163,6 +163,7 @@
     "templates_path": "templates",
     "static_files_path": "static",
     "backups_path": "backups",
+    "jwt_sign_key": "",
     "certificate_file": "",
     "certificate_key_file": "",
     "ca_certificates": [],

@@ -153,6 +153,8 @@ type Conf struct {
 	StaticFilesPath string `json:"static_files_path" mapstructure:"static_files_path"`
 	// Path to the backup directory. This can be an absolute path or a path relative to the config dir
 	BackupsPath string `json:"backups_path" mapstructure:"backups_path"`
+	// Jwt sign key for the api token and web admin cookie
+	JwtSignKey string `json:"jwt_sign_key" mapstructure:"jwt_sign_key"`
 	// If files containing a certificate and matching private key for the server are provided the server will expect
 	// HTTPS connections.
 	// Certificate and key files can be reloaded on demand sending a "SIGHUP" signal on Unix based systems and a
@@ -219,7 +221,7 @@ func (c *Conf) Initialize(configDir string) error {
 		certMgr = mgr
 	}
 
-	csrfTokenAuth = jwtauth.New("HS256", utils.GenerateRandomBytes(32), nil)
+	csrfTokenAuth = jwtauth.New("HS256", []byte(c.JwtSignKey), nil)
 
 	exitChannel := make(chan error, 1)
 
@@ -229,7 +231,7 @@ func (c *Conf) Initialize(configDir string) error {
 		}
 
 		go func(b Binding) {
-			server := newHttpdServer(b, staticFilesPath, enableWebAdmin)
+			server := newHttpdServer(b, staticFilesPath, enableWebAdmin, c.JwtSignKey)
 
 			exitChannel <- server.listenAndServe()
 		}(binding)
@@ -305,7 +307,7 @@ func GetHTTPRouter() http.Handler {
 		Port:           8080,
 		EnableWebAdmin: true,
 	}
-	server := newHttpdServer(b, "../static", true)
+	server := newHttpdServer(b, "../static", true, "test")
 	server.initializeRouter()
 	return server.router
 }

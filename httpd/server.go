@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/lestrrat-go/jwx/jwa"
 	"log"
 	"net/http"
 	"time"
@@ -31,11 +32,13 @@ type httpdServer struct {
 	tokenAuth       *jwtauth.JWTAuth
 }
 
-func newHttpdServer(b Binding, staticFilesPath string, enableWebAdmin bool) *httpdServer {
+func newHttpdServer(b Binding, staticFilesPath string, enableWebAdmin bool, jwtSignKey string) *httpdServer {
+	fmt.Println(jwtSignKey)
 	return &httpdServer{
 		binding:         b,
 		staticFilesPath: staticFilesPath,
 		enableWebAdmin:  enableWebAdmin && b.EnableWebAdmin,
+		tokenAuth:       jwtauth.New(jwa.HS256.String(), []byte(jwtSignKey), nil),
 	}
 }
 
@@ -252,7 +255,6 @@ func (s *httpdServer) updateContextFromCookie(r *http.Request) *http.Request {
 }
 
 func (s *httpdServer) initializeRouter() {
-	s.tokenAuth = jwtauth.New("HS256", utils.GenerateRandomBytes(32), nil)
 	s.router = chi.NewRouter()
 
 	s.router.Use(saveConnectionAddress)
