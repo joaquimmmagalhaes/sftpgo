@@ -21,6 +21,7 @@ import (
 
 const (
 	dateFormat = "2006-01-02T15:04:05.000" // YYYY-MM-DDTHH:MM:SS.ZZZ
+	levelFieldName = "severity" // YYYY-MM-DDTHH:MM:SS.ZZZ
 )
 
 // LogLevel defines log levels.
@@ -117,6 +118,7 @@ func GetLogger() *zerolog.Logger {
 // InitLogger configures the logger using the given parameters
 func InitLogger(logFilePath string, logMaxSize int, logMaxBackups int, logMaxAge int, logCompress bool, level zerolog.Level) {
 	zerolog.TimeFieldFormat = dateFormat
+	zerolog.LevelFieldName = levelFieldName
 	if isLogFilePathValid(logFilePath) {
 		rollingLogger = &lumberjack.Logger{
 			Filename:   logFilePath,
@@ -153,6 +155,7 @@ func DisableLogger() {
 
 // EnableConsoleLogger enables the console logger
 func EnableConsoleLogger(level zerolog.Level) {
+	zerolog.LevelFieldName = levelFieldName
 	consoleOutput := zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: dateFormat,
