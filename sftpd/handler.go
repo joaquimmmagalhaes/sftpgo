@@ -347,7 +347,7 @@ func (c *Connection) handleSFTPUploadToNewFile(resolvedPath, filePath, requestPa
 		return nil, sftp.ErrSSHFxFailure
 	}
 
-	file, w, cancelFn, err := c.Fs.Create(filePath, 0)
+	file, w, cancelFn, err := c.Fs.Create(filePath, 0, c.GetUserMetadata())
 	if err != nil {
 		c.Log(logger.LevelWarn, "error creating file %#v: %+v", resolvedPath, err)
 		return nil, c.GetFsError(err)
@@ -397,7 +397,7 @@ func (c *Connection) handleSFTPUploadToExistingFile(pflags sftp.FileOpenFlags, r
 		}
 	}
 
-	file, w, cancelFn, err := c.Fs.Create(filePath, osFlags)
+	file, w, cancelFn, err := c.Fs.Create(filePath, osFlags, c.GetUserMetadata())
 	if err != nil {
 		c.Log(logger.LevelWarn, "error opening existing file, flags: %v, source: %#v, err: %+v", pflags, filePath, err)
 		return nil, c.GetFsError(err)

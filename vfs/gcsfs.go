@@ -184,7 +184,7 @@ func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fu
 }
 
 // Create creates or opens the named file for writing
-func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *GCSFs) Create(name string, flag int, metadata map[string]string) (File, *PipeWriter, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -200,6 +200,14 @@ func (fs *GCSFs) Create(name string, flag int) (File, *PipeWriter, func(), error
 	} else {
 		contentType = mime.TypeByExtension(path.Ext(name))
 	}
+
+	if metadata != nil {
+		objectWriter.ObjectAttrs.Metadata = make(map[string]string)
+		for key := range metadata {
+			objectWriter.ObjectAttrs.Metadata[key] = metadata[key]
+		}
+	}
+
 	if contentType != "" {
 		objectWriter.ObjectAttrs.ContentType = contentType
 	}
@@ -299,7 +307,7 @@ func (fs *GCSFs) Mkdir(name string) error {
 	if !fs.IsNotExist(err) {
 		return err
 	}
-	_, w, _, err := fs.Create(name, -1)
+	_, w, _, err := fs.Create(name, -1, nil)
 	if err != nil {
 		return err
 	}

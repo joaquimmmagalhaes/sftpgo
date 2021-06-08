@@ -1,5 +1,4 @@
 # compilation output
 sftpgo
 sftpgo.exe
-vendor
-.idea/
+vendor/

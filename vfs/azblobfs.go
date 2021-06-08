@@ -221,7 +221,7 @@ func (fs *AzureBlobFs) Open(name string, offset int64) (File, *pipeat.PipeReader
 }
 
 // Create creates or opens the named file for writing
-func (fs *AzureBlobFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *AzureBlobFs) Create(name string, flag int, metadata map[string]string) (File, *PipeWriter, func(), error) {
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		return nil, nil, nil, err
@@ -352,7 +352,7 @@ func (fs *AzureBlobFs) Mkdir(name string) error {
 	if !fs.IsNotExist(err) {
 		return err
 	}
-	_, w, _, err := fs.Create(name, -1)
+	_, w, _, err := fs.Create(name, -1, nil)
 	if err != nil {
 		return err
 	}

@@ -36,7 +36,7 @@ type Fs interface {
 	Stat(name string) (os.FileInfo, error)
 	Lstat(name string) (os.FileInfo, error)
 	Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error)
-	Create(name string, flag int) (File, *PipeWriter, func(), error)
+	Create(name string, flag int, metadata map[string]string) (File, *PipeWriter, func(), error)
 	Rename(source, target string) error
 	Remove(name string, isDir bool) error
 	Mkdir(name string) error

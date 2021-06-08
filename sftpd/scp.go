@@ -42,7 +42,7 @@ func (c *scpCommand) handle() (err error) {
 
 	destPath := c.getDestPath()
 	commandType := c.getCommandType()
-	c.connection.Log(logger.LevelDebug, "handle scp command, args: %v user: %v command type: %v, dest path: %#v",
+	c.connection.Log(logger.LevelInfo, "handle scp command, args: %v user: %v command type: %v, dest path: %#v",
 		c.args, c.connection.User.Username, commandType, destPath)
 	if commandType == "-t" {
 		// -t means "to", so upload
@@ -201,7 +201,7 @@ func (c *scpCommand) handleUploadFile(resolvedPath, filePath string, sizeToRead 
 
 	maxWriteSize, _ := c.connection.GetMaxWriteSize(quotaResult, false, fileSize)
 
-	file, w, cancelFn, err := c.connection.Fs.Create(filePath, 0)
+	file, w, cancelFn, err := c.connection.Fs.Create(filePath, 0, nil)
 	if err != nil {
 		c.connection.Log(logger.LevelError, "error creating file %#v: %v", resolvedPath, err)
 		c.sendErrorMessage(err)

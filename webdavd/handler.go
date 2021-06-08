@@ -216,7 +216,7 @@ func (c *Connection) handleUploadToNewFile(resolvedPath, filePath, requestPath s
 		c.Log(logger.LevelInfo, "denying file write due to quota limits")
 		return nil, common.ErrQuotaExceeded
 	}
-	file, w, cancelFn, err := c.Fs.Create(filePath, 0)
+	file, w, cancelFn, err := c.Fs.Create(filePath, 0, c.GetUserMetadata())
 	if err != nil {
 		c.Log(logger.LevelWarn, "error creating file %#v: %+v", resolvedPath, err)
 		return nil, c.GetFsError(err)
@@ -255,7 +255,7 @@ func (c *Connection) handleUploadToExistingFile(resolvedPath, filePath string, f
 		}
 	}
 
-	file, w, cancelFn, err := c.Fs.Create(filePath, 0)
+	file, w, cancelFn, err := c.Fs.Create(filePath, 0, c.GetUserMetadata())
 	if err != nil {
 		c.Log(logger.LevelWarn, "error creating file %#v: %+v", resolvedPath, err)
 		return nil, c.GetFsError(err)

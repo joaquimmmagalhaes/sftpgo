@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1006,4 +1007,13 @@ func (c *BaseConnection) GetFsError(err error) error {
 		return c.GetGenericError(err)
 	}
 	return nil
+}
+
+func (c *BaseConnection) GetUserMetadata() map[string]string {
+	metadata := make(map[string]string)
+
+	metadata["username"] = c.User.Username
+	metadata["user_id"] = strconv.Itoa(int(c.User.ID))
+
+	return metadata
 }

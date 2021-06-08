@@ -131,7 +131,7 @@ func (fs *CryptFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, 
 }
 
 // Create creates or opens the named file for writing
-func (fs *CryptFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
+func (fs *CryptFs) Create(name string, flag int, metadata map[string]string) (File, *PipeWriter, func(), error) {
 	var err error
 	var f *os.File
 	if flag == 0 {
