@@ -3,3 +3,6 @@ sftpgo
 sftpgo.exe
 vendor
 .idea/
+id_*
+sftpgo.db
+sftpgo.log
