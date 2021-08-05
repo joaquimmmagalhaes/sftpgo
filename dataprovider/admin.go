@@ -1,6 +1,7 @@
 package dataprovider
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/alexedwards/argon2id"
-	"github.com/minio/sha256-simd"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/drakkan/sftpgo/utils"
 )
@@ -40,6 +41,7 @@ var (
 )
 
 // AdminFilters defines additional restrictions for SFTPGo admins
+// TODO: rename to AdminOptions in v3
 type AdminFilters struct {
 	// only clients connecting from these IP/Mask are allowed.
 	// IP/Mask must be in CIDR notation as defined in RFC 4632 and RFC 4291
@@ -59,16 +61,25 @@ type Admin struct {
 	Email          string       `json:"email"`
 	Permissions    []string     `json:"permissions"`
 	Filters        AdminFilters `json:"filters,omitempty"`
+	Description    string       `json:"description,omitempty"`
 	AdditionalInfo string       `json:"additional_info,omitempty"`
 }
 
 func (a *Admin) checkPassword() error {
-	if a.Password != "" && !strings.HasPrefix(a.Password, argonPwdPrefix) {
-		pwd, err := argon2id.CreateHash(a.Password, argon2Params)
-		if err != nil {
-			return err
+	if a.Password != "" && !utils.IsStringPrefixInSlice(a.Password, internalHashPwdPrefixes) {
+		if config.PasswordHashing.Algo == HashingAlgoBcrypt {
+			pwd, err := bcrypt.GenerateFromPassword([]byte(a.Password), config.PasswordHashing.BcryptOptions.Cost)
+			if err != nil {
+				return err
+			}
+			a.Password = string(pwd)
+		} else {
+			pwd, err := argon2id.CreateHash(a.Password, argon2Params)
+			if err != nil {
+				return err
+			}
+			a.Password = pwd
 		}
-		a.Password = pwd
 	}
 	return nil
 }
@@ -113,6 +124,12 @@ func (a *Admin) validate() error {
 
 // CheckPassword verifies the admin password
 func (a *Admin) CheckPassword(password string) (bool, error) {
+	if strings.HasPrefix(a.Password, bcryptPwdPrefix) {
+		if err := bcrypt.CompareHashAndPassword([]byte(a.Password), []byte(password)); err != nil {
+			return false, ErrInvalidCredentials
+		}
+		return true, nil
+	}
 	return argon2id.ComparePasswordAndHash(password, a.Password)
 }
 
@@ -223,6 +240,7 @@ func (a *Admin) getACopy() Admin {
 		Permissions:    permissions,
 		Filters:        filters,
 		AdditionalInfo: a.AdditionalInfo,
+		Description:    a.Description,
 	}
 }
 

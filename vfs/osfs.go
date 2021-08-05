@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/eikenb/pipeat"
+	fscopy "github.com/otiai10/copy"
 	"github.com/pkg/sftp"
 	"github.com/rs/xid"
 
 	"github.com/drakkan/sftpgo/logger"
-	"github.com/drakkan/sftpgo/utils"
 )
 
 const (
@@ -23,21 +23,30 @@ const (
 	osFsName = "osfs"
 )
 
+type pathResolutionError struct {
+	err string
+}
+
+func (e *pathResolutionError) Error() string {
+	return fmt.Sprintf("Path resolution error: %s", e.err)
+}
+
 // OsFs is a Fs implementation that uses functions provided by the os package.
 type OsFs struct {
-	name           string
-	connectionID   string
-	rootDir        string
-	virtualFolders []VirtualFolder
+	name         string
+	connectionID string
+	rootDir      string
+	// if not empty this fs is mouted as virtual folder in the specified path
+	mountPath string
 }
 
 // NewOsFs returns an OsFs object that allows to interact with local Os filesystem
-func NewOsFs(connectionID, rootDir string, virtualFolders []VirtualFolder) Fs {
+func NewOsFs(connectionID, rootDir, mountPath string) Fs {
 	return &OsFs{
-		name:           osFsName,
-		connectionID:   connectionID,
-		rootDir:        rootDir,
-		virtualFolders: virtualFolders,
+		name:         osFsName,
+		connectionID: connectionID,
+		rootDir:      rootDir,
+		mountPath:    mountPath,
 	}
 }
 
@@ -53,37 +62,27 @@ func (fs *OsFs) ConnectionID() string {
 
 // Stat returns a FileInfo describing the named file
 func (fs *OsFs) Stat(name string) (os.FileInfo, error) {
-	fi, err := os.Stat(name)
-	if err != nil {
-		return fi, err
-	}
-	for _, v := range fs.virtualFolders {
-		if v.MappedPath == name {
-			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
-			return info, nil
-		}
-	}
-	return fi, err
+	return os.Stat(name)
 }
 
 // Lstat returns a FileInfo describing the named file
 func (fs *OsFs) Lstat(name string) (os.FileInfo, error) {
-	fi, err := os.Lstat(name)
-	if err != nil {
-		return fi, err
-	}
-	for _, v := range fs.virtualFolders {
-		if v.MappedPath == name {
-			info := NewFileInfo(v.VirtualPath, true, fi.Size(), fi.ModTime(), false)
-			return info, nil
-		}
-	}
-	return fi, err
+	return os.Lstat(name)
 }
 
 // Open opens the named file for reading
 func (*OsFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, func(), error) {
 	f, err := os.Open(name)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if offset > 0 {
+		_, err = f.Seek(offset, io.SeekStart)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+	}
 	return f, nil, nil, err
 }
 
@@ -100,8 +99,23 @@ func (*OsFs) Create(name string, flag int, metadata map[string]string) (File, *P
 }
 
 // Rename renames (moves) source to target
-func (*OsFs) Rename(source, target string) error {
-	return os.Rename(source, target)
+func (fs *OsFs) Rename(source, target string) error {
+	err := os.Rename(source, target)
+	if err != nil && isCrossDeviceError(err) {
+		fsLog(fs, logger.LevelWarn, "cross device error detected while renaming %#v -> %#v. Trying a copy and remove, this could take a long time",
+			source, target)
+		err = fscopy.Copy(source, target, fscopy.Options{
+			OnSymlink: func(src string) fscopy.SymlinkAction {
+				return fscopy.Skip
+			},
+		})
+		if err != nil {
+			fsLog(fs, logger.LevelDebug, "cross device copy error: %v", err)
+			return err
+		}
+		return os.RemoveAll(source)
+	}
+	return err
 }
 
 // Remove removes the named file or (empty) directory.
@@ -112,6 +126,13 @@ func (*OsFs) Remove(name string, isDir bool) error {
 // Mkdir creates a new directory with the specified name and default permissions
 func (*OsFs) Mkdir(name string) error {
 	return os.Mkdir(name, os.ModePerm)
+}
+
+// MkdirAll creates a directory named path, along with any necessary parents,
+// and returns nil, or else returns an error.
+// If path is already a directory, MkdirAll does nothing and returns nil.
+func (fs *OsFs) MkdirAll(name string, uid int, gid int) error {
+	return fs.createMissingDirs(name, uid, gid)
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -164,7 +185,7 @@ func (*OsFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return list, nil
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported
+// IsUploadResumeSupported returns true if resuming uploads is supported
 func (*OsFs) IsUploadResumeSupported() bool {
 	return true
 }
@@ -183,6 +204,10 @@ func (*OsFs) IsNotExist(err error) bool {
 // IsPermission returns a boolean indicating whether the error is known to
 // report that permission is denied.
 func (*OsFs) IsPermission(err error) bool {
+	if _, ok := err.(*pathResolutionError); ok {
+		return true
+	}
+
 	return os.IsPermission(err)
 }
 
@@ -205,67 +230,33 @@ func (fs *OsFs) CheckRootPath(username string, uid int, gid int) bool {
 			SetPathPermissions(fs, fs.rootDir, uid, gid)
 		}
 	}
-	// create any missing dirs to the defined virtual dirs
-	for _, v := range fs.virtualFolders {
-		p := filepath.Clean(filepath.Join(fs.rootDir, v.VirtualPath))
-		err = fs.createMissingDirs(p, uid, gid)
-		if err != nil {
-			return false
-		}
-		if _, err = fs.Stat(v.MappedPath); fs.IsNotExist(err) {
-			err = os.MkdirAll(v.MappedPath, os.ModePerm)
-			fsLog(fs, logger.LevelDebug, "virtual directory %#v for user %#v does not exist, try to create, mkdir error: %v",
-				v.MappedPath, username, err)
-			if err == nil {
-				SetPathPermissions(fs, fs.rootDir, uid, gid)
-			}
-		}
-	}
-	return (err == nil)
+	return err == nil
 }
 
 // ScanRootDirContents returns the number of files contained in the root
 // directory and their size
 func (fs *OsFs) ScanRootDirContents() (int, int64, error) {
-	numFiles, size, err := fs.GetDirSize(fs.rootDir)
-	for _, v := range fs.virtualFolders {
-		if !v.IsIncludedInUserQuota() {
-			continue
-		}
-		num, s, err := fs.GetDirSize(v.MappedPath)
-		if err != nil {
-			if fs.IsNotExist(err) {
-				fsLog(fs, logger.LevelWarn, "unable to scan contents for non-existent mapped path: %#v", v.MappedPath)
-				continue
-			}
-			return numFiles, size, err
-		}
-		numFiles += num
-		size += s
-	}
-	return numFiles, size, err
+	return fs.GetDirSize(fs.rootDir)
 }
 
 // GetAtomicUploadPath returns the path to use for an atomic upload
 func (*OsFs) GetAtomicUploadPath(name string) string {
 	dir := filepath.Dir(name)
+	if tempPath != "" {
+		dir = tempPath
+	}
 	guid := xid.New().String()
 	return filepath.Join(dir, ".sftpgo-upload."+guid+"."+filepath.Base(name))
 }
 
 // GetRelativePath returns the path for a file relative to the user's home dir.
-// This is the path as seen by SFTP users
+// This is the path as seen by SFTPGo users
 func (fs *OsFs) GetRelativePath(name string) string {
-	basePath := fs.rootDir
 	virtualPath := "/"
-	for _, v := range fs.virtualFolders {
-		if strings.HasPrefix(name, v.MappedPath+string(os.PathSeparator)) ||
-			filepath.Clean(name) == v.MappedPath {
-			basePath = v.MappedPath
-			virtualPath = v.VirtualPath
-		}
+	if fs.mountPath != "" {
+		virtualPath = fs.mountPath
 	}
-	rel, err := filepath.Rel(basePath, filepath.Clean(name))
+	rel, err := filepath.Rel(fs.rootDir, filepath.Clean(name))
 	if err != nil {
 		return ""
 	}
@@ -287,28 +278,31 @@ func (*OsFs) Join(elem ...string) string {
 }
 
 // ResolvePath returns the matching filesystem path for the specified sftp path
-func (fs *OsFs) ResolvePath(sftpPath string) (string, error) {
+func (fs *OsFs) ResolvePath(virtualPath string) (string, error) {
 	if !filepath.IsAbs(fs.rootDir) {
-		return "", fmt.Errorf("Invalid root path: %v", fs.rootDir)
+		return "", fmt.Errorf("invalid root path: %v", fs.rootDir)
 	}
-	basePath, r := fs.GetFsPaths(sftpPath)
+	if fs.mountPath != "" {
+		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
+	}
+	r := filepath.Clean(filepath.Join(fs.rootDir, virtualPath))
 	p, err := filepath.EvalSymlinks(r)
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	} else if os.IsNotExist(err) {
 		// The requested path doesn't exist, so at this point we need to iterate up the
 		// path chain until we hit a directory that _does_ exist and can be validated.
-		_, err = fs.findFirstExistingDir(r, basePath)
+		_, err = fs.findFirstExistingDir(r)
 		if err != nil {
 			fsLog(fs, logger.LevelWarn, "error resolving non-existent path %#v", err)
 		}
 		return r, err
 	}
 
-	err = fs.isSubDir(p, basePath)
+	err = fs.isSubDir(p)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "Invalid path resolution, dir %#v original path %#v resolved %#v err: %v",
-			p, sftpPath, r, err)
+			p, virtualPath, r, err)
 	}
 	return r, err
 }
@@ -339,43 +333,9 @@ func (*OsFs) HasVirtualFolders() bool {
 	return false
 }
 
-// GetFsPaths returns the base path and filesystem path for the given sftpPath.
-// base path is the root dir or matching the virtual folder dir for the sftpPath.
-// file path is the filesystem path matching the sftpPath
-func (fs *OsFs) GetFsPaths(sftpPath string) (string, string) {
-	basePath := fs.rootDir
-	virtualPath, mappedPath := fs.getMappedFolderForPath(sftpPath)
-	if len(mappedPath) > 0 {
-		basePath = mappedPath
-		sftpPath = strings.TrimPrefix(utils.CleanPath(sftpPath), virtualPath)
-	}
-	r := filepath.Clean(filepath.Join(basePath, sftpPath))
-	return basePath, r
-}
-
-// returns the path for the mapped folders or an empty string
-func (fs *OsFs) getMappedFolderForPath(p string) (virtualPath, mappedPath string) {
-	if len(fs.virtualFolders) == 0 {
-		return
-	}
-	dirsForPath := utils.GetDirsForSFTPPath(p)
-	// dirsForPath contains all the dirs for a given path in reverse order
-	// for example if the path is: /1/2/3/4 it contains:
-	// [ "/1/2/3/4", "/1/2/3", "/1/2", "/1", "/" ]
-	// so the first match is the one we are interested to
-	for _, val := range dirsForPath {
-		for _, v := range fs.virtualFolders {
-			if val == v.VirtualPath {
-				return v.VirtualPath, v.MappedPath
-			}
-		}
-	}
-	return
-}
-
-func (fs *OsFs) findNonexistentDirs(path, rootPath string) ([]string, error) {
+func (fs *OsFs) findNonexistentDirs(filePath string) ([]string, error) {
 	results := []string{}
-	cleanPath := filepath.Clean(path)
+	cleanPath := filepath.Clean(filePath)
 	parent := filepath.Dir(cleanPath)
 	_, err := os.Stat(parent)
 
@@ -391,15 +351,15 @@ func (fs *OsFs) findNonexistentDirs(path, rootPath string) ([]string, error) {
 	if err != nil {
 		return results, err
 	}
-	err = fs.isSubDir(p, rootPath)
+	err = fs.isSubDir(p)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "error finding non existing dir: %v", err)
 	}
 	return results, err
 }
 
-func (fs *OsFs) findFirstExistingDir(path, rootPath string) (string, error) {
-	results, err := fs.findNonexistentDirs(path, rootPath)
+func (fs *OsFs) findFirstExistingDir(path string) (string, error) {
+	results, err := fs.findNonexistentDirs(path)
 	if err != nil {
 		fsLog(fs, logger.LevelWarn, "unable to find non existent dirs: %v", err)
 		return "", err
@@ -409,7 +369,7 @@ func (fs *OsFs) findFirstExistingDir(path, rootPath string) (string, error) {
 		lastMissingDir := results[len(results)-1]
 		parent = filepath.Dir(lastMissingDir)
 	} else {
-		parent = rootPath
+		parent = fs.rootDir
 	}
 	p, err := filepath.EvalSymlinks(parent)
 	if err != nil {
@@ -422,15 +382,15 @@ func (fs *OsFs) findFirstExistingDir(path, rootPath string) (string, error) {
 	if !fileInfo.IsDir() {
 		return "", fmt.Errorf("resolved path is not a dir: %#v", p)
 	}
-	err = fs.isSubDir(p, rootPath)
+	err = fs.isSubDir(p)
 	return p, err
 }
 
-func (fs *OsFs) isSubDir(sub, rootPath string) error {
-	// rootPath must exist and it is already a validated absolute path
-	parent, err := filepath.EvalSymlinks(rootPath)
+func (fs *OsFs) isSubDir(sub string) error {
+	// fs.rootDir must exist and it is already a validated absolute path
+	parent, err := filepath.EvalSymlinks(fs.rootDir)
 	if err != nil {
-		fsLog(fs, logger.LevelWarn, "invalid root path %#v: %v", rootPath, err)
+		fsLog(fs, logger.LevelWarn, "invalid root path %#v: %v", fs.rootDir, err)
 		return err
 	}
 	if parent == sub {
@@ -438,17 +398,23 @@ func (fs *OsFs) isSubDir(sub, rootPath string) error {
 	}
 	if len(sub) < len(parent) {
 		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
-		return err
+		return &pathResolutionError{err: err.Error()}
 	}
-	if !strings.HasPrefix(sub, parent+string(os.PathSeparator)) {
+	separator := string(os.PathSeparator)
+	if parent == filepath.Dir(parent) {
+		// parent is the root dir, on Windows we can have C:\, D:\ and so on here
+		// so we still need the prefix check
+		separator = ""
+	}
+	if !strings.HasPrefix(sub, parent+separator) {
 		err = fmt.Errorf("path %#v is not inside %#v", sub, parent)
-		return err
+		return &pathResolutionError{err: err.Error()}
 	}
 	return nil
 }
 
 func (fs *OsFs) createMissingDirs(filePath string, uid, gid int) error {
-	dirsToCreate, err := fs.findNonexistentDirs(filePath, fs.rootDir)
+	dirsToCreate, err := fs.findNonexistentDirs(filePath)
 	if err != nil {
 		return err
 	}

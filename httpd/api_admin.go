@@ -11,11 +11,6 @@ import (
 	"github.com/drakkan/sftpgo/dataprovider"
 )
 
-type adminPwd struct {
-	CurrentPassword string `json:"current_password"`
-	NewPassword     string `json:"new_password"`
-}
-
 func getAdmins(w http.ResponseWriter, r *http.Request) {
 	limit, offset, order, err := getSearchFilters(w, r)
 	if err != nil {
@@ -89,11 +84,11 @@ func updateAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	if username == claims.Username {
 		if claims.isCriticalPermRemoved(admin.Permissions) {
-			sendAPIResponse(w, r, errors.New("You cannot remove these permissions to yourself"), "", http.StatusBadRequest)
+			sendAPIResponse(w, r, errors.New("you cannot remove these permissions to yourself"), "", http.StatusBadRequest)
 			return
 		}
 		if admin.Status == 0 {
-			sendAPIResponse(w, r, errors.New("You cannot disable yourself"), "", http.StatusBadRequest)
+			sendAPIResponse(w, r, errors.New("you cannot disable yourself"), "", http.StatusBadRequest)
 			return
 		}
 	}
@@ -114,7 +109,7 @@ func deleteAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if username == claims.Username {
-		sendAPIResponse(w, r, errors.New("You cannot delete yourself"), "", http.StatusBadRequest)
+		sendAPIResponse(w, r, errors.New("you cannot delete yourself"), "", http.StatusBadRequest)
 		return
 	}
 
@@ -129,7 +124,7 @@ func deleteAdmin(w http.ResponseWriter, r *http.Request) {
 func changeAdminPassword(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 
-	var pwd adminPwd
+	var pwd pwdChange
 	err := render.DecodeJSON(r.Body, &pwd)
 	if err != nil {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)

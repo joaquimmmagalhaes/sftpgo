@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [2.0.x]
+    branches: [2.1.x]
   pull_request:
 
 jobs:
@@ -12,8 +12,12 @@ jobs:
     strategy:
       matrix:
         go: [1.16]
-        os: [ubuntu-18.04, macos-10.15, windows-2019]
-        upload-coverage: [false]
+        os: [ubuntu-latest, macos-latest]
+        upload-coverage: [true]
+        include:
+          - go: 1.16
+            os: windows-latest
+            upload-coverage: false
 
     steps:
       - uses: actions/checkout@v2
@@ -25,16 +29,20 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      - name: Build for Linux/macOS
+      - name: Build for Linux/macOS x86_64
         if: startsWith(matrix.os, 'windows-') != true
-        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+        run: go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+
+      - name: Build for macOS arm64
+        if: startsWith(matrix.os, 'macos-') == true
+        run: CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 SDKROOT=$(xcrun --sdk macosx --show-sdk-path) go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo_arm64
 
       - name: Build for Windows
         if: startsWith(matrix.os, 'windows-')
         run: |
           $GIT_COMMIT = (git describe --always --dirty) | Out-String
           $DATE_TIME = ([datetime]::Now.ToUniversalTime().toString("yyyy-MM-ddTHH:mm:ssZ")) | Out-String
-          go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=$GIT_COMMIT -X github.com/drakkan/sftpgo/version.date=$DATE_TIME" -o sftpgo.exe
+          go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=$GIT_COMMIT -X github.com/drakkan/sftpgo/version.date=$DATE_TIME" -o sftpgo.exe
 
       - name: Run test cases using SQLite provider
         run: go test -v -p 1 -timeout 10m ./... -coverprofile=coverage.txt -covermode=atomic
@@ -49,11 +57,11 @@ jobs:
       - name: Run test cases using bolt provider
         run: |
           go test -v -p 1 -timeout 2m ./config -covermode=atomic
-          go test -v -p 1 -timeout 2m ./common -covermode=atomic
-          go test -v -p 1 -timeout 3m ./httpd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./common -covermode=atomic
+          go test -v -p 1 -timeout 5m ./httpd -covermode=atomic
           go test -v -p 1 -timeout 8m ./sftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./ftpd -covermode=atomic
-          go test -v -p 1 -timeout 2m ./webdavd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./ftpd -covermode=atomic
+          go test -v -p 1 -timeout 5m ./webdavd -covermode=atomic
           go test -v -p 1 -timeout 2m ./telemetry -covermode=atomic
         env:
           SFTPGO_DATA_PROVIDER__DRIVER: bolt
@@ -65,48 +73,20 @@ jobs:
           SFTPGO_DATA_PROVIDER__DRIVER: memory
           SFTPGO_DATA_PROVIDER__NAME: ''
 
-      - name: Gather cross build info
-        id: cross_info
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
+      - name: Prepare build artifact for macOS
+        if: startsWith(matrix.os, 'macos-') == true
         run: |
-          GIT_COMMIT=$(git describe --always)
-          BUILD_DATE=$(date -u +%FT%TZ)
-          echo ::set-output name=sha::${GIT_COMMIT}
-          echo ::set-output name=created::${BUILD_DATE}
-
-      - name: Cross build with xgo
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: crazy-max/ghaction-xgo@v1
-        with:
-          go_version: 1.16.x
-          dest: cross
-          prefix: sftpgo
-          targets: linux/arm64,linux/ppc64le
-          v: true
-          x: false
-          race: false
-          ldflags: -s -w -X github.com/drakkan/sftpgo/version.commit=${{ steps.cross_info.outputs.sha }} -X github.com/drakkan/sftpgo/version.date=${{ steps.cross_info.outputs.created }}
-          buildmode: default
-
-      - name: Prepare build artifact for Linux/macOS
-        if: startsWith(matrix.os, 'windows-') != true
-        run: |
-          mkdir -p output/{bash_completion,zsh_completion}
-          cp sftpgo output/
+          mkdir -p output/{init,bash_completion,zsh_completion}
+          cp sftpgo output/sftpgo_x86_64
+          cp sftpgo_arm64 output/
           cp sftpgo.json output/
           cp -r templates output/
           cp -r static output/
-          cp -r init output/
+          cp init/com.github.drakkan.sftpgo.plist output/init/
           ./sftpgo gen completion bash > output/bash_completion/sftpgo
           ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
           ./sftpgo gen man -d output/man/man1
           gzip output/man/man1/*
-
-      - name: Copy cross compiled Linux binaries
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        run: |
-          cp cross/sftpgo-linux-arm64 output/
-          cp cross/sftpgo-linux-ppc64le output/
 
       - name: Prepare build artifact for Windows
         if: startsWith(matrix.os, 'windows-')
@@ -120,79 +100,15 @@ jobs:
           xcopy .\static .\output\static\ /E
 
       - name: Upload build artifact
+        if: startsWith(matrix.os, 'ubuntu-') != true
         uses: actions/upload-artifact@v2
         with:
-          name: sftpgo-${{ matrix.os }}-go${{ matrix.go }}
+          name: sftpgo-${{ matrix.os }}-go-${{ matrix.go }}
           path: output
 
-      - name: Build Linux Packages
-        id: build_linux_pkgs
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        run: |
-          cp -r pkgs pkgs_arm64
-          cp -r pkgs pkgs_ppc64le
-          cd pkgs
-          ./build.sh
-          cd ..
-          export NFPM_ARCH=arm64
-          export BIN_SUFFIX=-linux-arm64
-          cp cross/sftpgo${BIN_SUFFIX} .
-          cd pkgs_arm64
-          ./build.sh
-          cd ..
-          export NFPM_ARCH=ppc64le
-          export BIN_SUFFIX=-linux-ppc64le
-          cp cross/sftpgo${BIN_SUFFIX} .
-          cd pkgs_ppc64le
-          ./build.sh
-          PKG_VERSION=$(cat dist/version)
-          echo "::set-output name=pkg-version::${PKG_VERSION}"
-
-      - name: Upload Debian Package
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-deb
-          path: pkgs/dist/deb/*
-
-      - name: Upload RPM Package
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-x86_64-rpm
-          path: pkgs/dist/rpm/*
-
-      - name: Upload Debian Package arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-deb
-          path: pkgs_arm64/dist/deb/*
-
-      - name: Upload RPM Package arm64
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-arm64-rpm
-          path: pkgs_arm64/dist/rpm/*
-
-      - name: Upload Debian Package ppc64le
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-ppc64le-deb
-          path: pkgs_ppc64le/dist/deb/*
-
-      - name: Upload RPM Package ppc64le
-        if: ${{ matrix.upload-coverage && startsWith(matrix.os, 'ubuntu-') }}
-        uses: actions/upload-artifact@v2
-        with:
-          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-ppc64le-rpm
-          path: pkgs_ppc64le/dist/rpm/*
-
-  test-postgresql-mysql:
-    name: Test with PostgreSQL/MySQL
-    runs-on: ubuntu-18.04
+  test-postgresql-mysql-crdb:
+    name: Test with PgSQL/MySQL/Cockroach
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -232,7 +148,7 @@ jobs:
           go-version: 1.16
 
       - name: Build
-        run: go build -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+        run: go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
 
       - name: Run tests using PostgreSQL provider
         run: |
@@ -256,12 +172,137 @@ jobs:
           SFTPGO_DATA_PROVIDER__USERNAME: sftpgo
           SFTPGO_DATA_PROVIDER__PASSWORD: sftpgo
 
-  golangci-lint:
-    name: golangci-lint
+      - name: Run tests using CockroachDB provider
+        run: |
+          docker run --rm --name crdb --health-cmd "curl -I http://127.0.0.1:8080" --health-interval 10s --health-timeout 5s --health-retries 6 -p 26257:26257 -d cockroachdb/cockroach:latest start-single-node --insecure --listen-addr 0.0.0.0:26257
+          docker exec crdb cockroach sql --insecure -e 'create database "sftpgo"'
+          go test -v -p 1 -timeout 10m ./... -covermode=atomic
+          docker stop crdb
+        env:
+          SFTPGO_DATA_PROVIDER__DRIVER: cockroachdb
+          SFTPGO_DATA_PROVIDER__NAME: sftpgo
+          SFTPGO_DATA_PROVIDER__HOST: localhost
+          SFTPGO_DATA_PROVIDER__PORT: 26257
+          SFTPGO_DATA_PROVIDER__USERNAME: root
+          SFTPGO_DATA_PROVIDER__PASSWORD:
+
+  build-linux-packages:
+    name: Build Linux packages
     runs-on: ubuntu-18.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            go: 1.16
+            go-arch: amd64
+          - arch: aarch64
+            distro: ubuntu18.04
+            go: latest
+            go-arch: arm64
+          - arch: ppc64le
+            distro: ubuntu18.04
+            go: latest
+            go-arch: ppc64le
     steps:
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        if: ${{ matrix.arch == 'amd64' }}
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Build on amd64
+        if: ${{ matrix.arch == 'amd64' }}
+        run: |
+          go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+          mkdir -p output/{init,bash_completion,zsh_completion}
+          cp sftpgo.json output/
+          cp -r templates output/
+          cp -r static output/
+          cp init/sftpgo.service output/init/
+          ./sftpgo gen completion bash > output/bash_completion/sftpgo
+          ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
+          ./sftpgo gen man -d output/man/man1
+          gzip output/man/man1/*
+          cp sftpgo output/
+
+      - uses: uraimo/run-on-arch-action@v2.0.10
+        if: ${{ matrix.arch != 'amd64' }}
+        name: Build for ${{ matrix.arch }}
+        id: build
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ${{ matrix.distro }}
+          setup: |
+            mkdir -p "${PWD}/output"
+          dockerRunArgs: |
+            --volume "${PWD}/output:/output"
+          shell: /bin/bash
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y curl gcc git
+            if [ ${{ matrix.go }} == 'latest' ]
+            then
+              GO_VERSION=$(curl https://golang.org/VERSION?m=text)
+            else
+              GO_VERSION=${{ matrix.go }}
+            fi
+            curl --retry 5 --retry-delay 2 --connect-timeout 10 -o go.tar.gz -L https://golang.org/dl/${GO_VERSION}.linux-${{ matrix.go-arch }}.tar.gz
+            tar -C /usr/local -xzf go.tar.gz
+          run: |
+            export PATH=$PATH:/usr/local/go/bin
+            go build -trimpath -ldflags "-s -w -X github.com/drakkan/sftpgo/version.commit=`git describe --always --dirty` -X github.com/drakkan/sftpgo/version.date=`date -u +%FT%TZ`" -o sftpgo
+            mkdir -p output/{init,bash_completion,zsh_completion}
+            cp sftpgo.json output/
+            cp -r templates output/
+            cp -r static output/
+            cp init/sftpgo.service output/init/
+            ./sftpgo gen completion bash > output/bash_completion/sftpgo
+            ./sftpgo gen completion zsh > output/zsh_completion/_sftpgo
+            ./sftpgo gen man -d output/man/man1
+            gzip output/man/man1/*
+            cp sftpgo output/
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-linux-${{ matrix.arch }}-go-${{ matrix.go }}
+          path: output
+
+      - name: Build Packages
+        id: build_linux_pkgs
+        run: |
+          export NFPM_ARCH=${{ matrix.go-arch }}
+          cd pkgs
+          ./build.sh
+          PKG_VERSION=$(cat dist/version)
+          echo "::set-output name=pkg-version::${PKG_VERSION}"
+
+      - name: Upload Debian Package
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.go-arch }}-deb
+          path: pkgs/dist/deb/*
+
+      - name: Upload RPM Package
+        uses: actions/upload-artifact@v2
+        with:
+          name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.go-arch }}-rpm
+          path: pkgs/dist/rpm/*
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v2
         with:
-          version: v1.37.1
+          version: latest
+          skip-go-installation: true

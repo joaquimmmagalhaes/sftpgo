@@ -20,46 +20,48 @@ var (
 
 // BaseTransfer contains protocols common transfer details for an upload or a download.
 type BaseTransfer struct { //nolint:maligned
-	ID             uint64
-	BytesSent      int64
-	BytesReceived  int64
-	Fs             vfs.Fs
-	File           vfs.File
-	Connection     *BaseConnection
-	cancelFn       func()
-	fsPath         string
-	requestPath    string
-	start          time.Time
-	MaxWriteSize   int64
-	MinWriteOffset int64
-	InitialSize    int64
-	isNewFile      bool
-	transferType   int
-	AbortTransfer  int32
+	ID              uint64
+	BytesSent       int64
+	BytesReceived   int64
+	Fs              vfs.Fs
+	File            vfs.File
+	Connection      *BaseConnection
+	cancelFn        func()
+	fsPath          string
+	effectiveFsPath string
+	requestPath     string
+	start           time.Time
+	MaxWriteSize    int64
+	MinWriteOffset  int64
+	InitialSize     int64
+	isNewFile       bool
+	transferType    int
+	AbortTransfer   int32
 	sync.Mutex
 	ErrTransfer error
 }
 
 // NewBaseTransfer returns a new BaseTransfer and adds it to the given connection
-func NewBaseTransfer(file vfs.File, conn *BaseConnection, cancelFn func(), fsPath, requestPath string, transferType int,
-	minWriteOffset, initialSize, maxWriteSize int64, isNewFile bool, fs vfs.Fs) *BaseTransfer {
+func NewBaseTransfer(file vfs.File, conn *BaseConnection, cancelFn func(), fsPath, effectiveFsPath, requestPath string,
+	transferType int, minWriteOffset, initialSize, maxWriteSize int64, isNewFile bool, fs vfs.Fs) *BaseTransfer {
 	t := &BaseTransfer{
-		ID:             conn.GetTransferID(),
-		File:           file,
-		Connection:     conn,
-		cancelFn:       cancelFn,
-		fsPath:         fsPath,
-		start:          time.Now(),
-		transferType:   transferType,
-		MinWriteOffset: minWriteOffset,
-		InitialSize:    initialSize,
-		isNewFile:      isNewFile,
-		requestPath:    requestPath,
-		BytesSent:      0,
-		BytesReceived:  0,
-		MaxWriteSize:   maxWriteSize,
-		AbortTransfer:  0,
-		Fs:             fs,
+		ID:              conn.GetTransferID(),
+		File:            file,
+		Connection:      conn,
+		cancelFn:        cancelFn,
+		fsPath:          fsPath,
+		effectiveFsPath: effectiveFsPath,
+		start:           time.Now(),
+		transferType:    transferType,
+		MinWriteOffset:  minWriteOffset,
+		InitialSize:     initialSize,
+		isNewFile:       isNewFile,
+		requestPath:     requestPath,
+		BytesSent:       0,
+		BytesReceived:   0,
+		MaxWriteSize:    maxWriteSize,
+		AbortTransfer:   0,
+		Fs:              fs,
 	}
 
 	conn.AddTransfer(t)
@@ -148,9 +150,12 @@ func (t *BaseTransfer) Truncate(fsPath string, size int64) (int64, error) {
 		}
 		if size == 0 && atomic.LoadInt64(&t.BytesSent) == 0 {
 			// for cloud providers the file is always truncated to zero, we don't support append/resume for uploads
-			return 0, nil
+			// for buffered SFTP we can have buffered bytes so we returns an error
+			if !vfs.IsBufferedSFTPFs(t.Fs) {
+				return 0, nil
+			}
 		}
-		return 0, ErrOpUnsupported
+		return 0, vfs.ErrVfsUnsupported
 	}
 	return 0, errTransferMismatch
 }
@@ -180,7 +185,7 @@ func (t *BaseTransfer) getUploadFileSize() (int64, error) {
 		fileSize = info.Size()
 	}
 	if vfs.IsCryptOsFs(t.Fs) && t.ErrTransfer != nil {
-		errDelete := t.Connection.Fs.Remove(t.fsPath, false)
+		errDelete := t.Fs.Remove(t.fsPath, false)
 		if errDelete != nil {
 			t.Connection.Log(logger.LevelWarn, "error removing partial crypto file %#v: %v", t.fsPath, errDelete)
 		}
@@ -204,7 +209,7 @@ func (t *BaseTransfer) Close() error {
 	metrics.TransferCompleted(atomic.LoadInt64(&t.BytesSent), atomic.LoadInt64(&t.BytesReceived), t.transferType, t.ErrTransfer)
 	if t.ErrTransfer == ErrQuotaExceeded && t.File != nil {
 		// if quota is exceeded we try to remove the partial file for uploads to local filesystem
-		err = t.Connection.Fs.Remove(t.File.Name(), false)
+		err = t.Fs.Remove(t.File.Name(), false)
 		if err == nil {
 			numFiles--
 			atomic.StoreInt64(&t.BytesReceived, 0)
@@ -212,15 +217,15 @@ func (t *BaseTransfer) Close() error {
 		}
 		t.Connection.Log(logger.LevelWarn, "upload denied due to space limit, delete temporary file: %#v, deletion error: %v",
 			t.File.Name(), err)
-	} else if t.transferType == TransferUpload && t.File != nil && t.File.Name() != t.fsPath {
+	} else if t.transferType == TransferUpload && t.effectiveFsPath != t.fsPath {
 		if t.ErrTransfer == nil || Config.UploadMode == UploadModeAtomicWithResume {
-			err = t.Connection.Fs.Rename(t.File.Name(), t.fsPath)
+			err = t.Fs.Rename(t.effectiveFsPath, t.fsPath)
 			t.Connection.Log(logger.LevelDebug, "atomic upload completed, rename: %#v -> %#v, error: %v",
-				t.File.Name(), t.fsPath, err)
+				t.effectiveFsPath, t.fsPath, err)
 		} else {
-			err = t.Connection.Fs.Remove(t.File.Name(), false)
+			err = t.Fs.Remove(t.effectiveFsPath, false)
 			t.Connection.Log(logger.LevelWarn, "atomic upload completed with error: \"%v\", delete temporary file: %#v, "+
-				"deletion error: %v", t.ErrTransfer, t.File.Name(), err)
+				"deletion error: %v", t.ErrTransfer, t.effectiveFsPath, err)
 			if err == nil {
 				numFiles--
 				atomic.StoreInt64(&t.BytesReceived, 0)
@@ -231,10 +236,9 @@ func (t *BaseTransfer) Close() error {
 	elapsed := time.Since(t.start).Nanoseconds() / 1000000
 	if t.transferType == TransferDownload {
 		logger.TransferLog(downloadLogSender, t.fsPath, elapsed, atomic.LoadInt64(&t.BytesSent), t.Connection.User.Username,
-			t.Connection.ID, t.Connection.protocol)
-		action := newActionNotification(&t.Connection.User, operationDownload, t.fsPath, "", "", t.Connection.protocol,
+			t.Connection.ID, t.Connection.protocol, t.Connection.remoteAddr)
+		ExecuteActionNotification(&t.Connection.User, operationDownload, t.fsPath, t.requestPath, "", "", t.Connection.protocol,
 			atomic.LoadInt64(&t.BytesSent), t.ErrTransfer)
-		go actionHandler.Handle(action) //nolint:errcheck
 	} else {
 		fileSize := atomic.LoadInt64(&t.BytesReceived) + t.MinWriteOffset
 		if statSize, err := t.getUploadFileSize(); err == nil {
@@ -243,10 +247,9 @@ func (t *BaseTransfer) Close() error {
 		t.Connection.Log(logger.LevelDebug, "uploaded file size %v", fileSize)
 		t.updateQuota(numFiles, fileSize)
 		logger.TransferLog(uploadLogSender, t.fsPath, elapsed, atomic.LoadInt64(&t.BytesReceived), t.Connection.User.Username,
-			t.Connection.ID, t.Connection.protocol)
-		action := newActionNotification(&t.Connection.User, operationUpload, t.fsPath, "", "", t.Connection.protocol,
-			fileSize, t.ErrTransfer)
-		go actionHandler.Handle(action) //nolint:errcheck
+			t.Connection.ID, t.Connection.protocol, t.Connection.remoteAddr)
+		ExecuteActionNotification(&t.Connection.User, operationUpload, t.fsPath, t.requestPath, "", "", t.Connection.protocol, fileSize,
+			t.ErrTransfer)
 	}
 	if t.ErrTransfer != nil {
 		t.Connection.Log(logger.LevelWarn, "transfer error: %v, path: %#v", t.ErrTransfer, t.fsPath)

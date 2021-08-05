@@ -1,13 +1,14 @@
 // Package httpd implements REST API and Web interface for SFTPGo.
 // The OpenAPI 3 schema for the exposed API can be found inside the source tree:
 // https://github.com/drakkan/sftpgo/blob/main/httpd/schema/openapi.yaml
-// A basic Web interface to manage users and connections is provided too
 package httpd
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/jwtauth/v5"
+	"github.com/lestrrat-go/jwx/jwa"
 
 	"github.com/drakkan/sftpgo/common"
 	"github.com/drakkan/sftpgo/dataprovider"
@@ -27,60 +29,124 @@ import (
 )
 
 const (
-	logSender                 = "httpd"
-	tokenPath                 = "/api/v2/token"
-	logoutPath                = "/api/v2/logout"
-	activeConnectionsPath     = "/api/v2/connections"
-	quotaScanPath             = "/api/v2/quota-scans"
-	quotaScanVFolderPath      = "/api/v2/folder-quota-scans"
-	userPath                  = "/api/v2/users"
-	versionPath               = "/api/v2/version"
-	folderPath                = "/api/v2/folders"
-	serverStatusPath          = "/api/v2/status"
-	dumpDataPath              = "/api/v2/dumpdata"
-	loadDataPath              = "/api/v2/loaddata"
-	updateUsedQuotaPath       = "/api/v2/quota-update"
-	updateFolderUsedQuotaPath = "/api/v2/folder-quota-update"
-	defenderBanTime           = "/api/v2/defender/bantime"
-	defenderUnban             = "/api/v2/defender/unban"
-	defenderScore             = "/api/v2/defender/score"
-	adminPath                 = "/api/v2/admins"
-	adminPwdPath              = "/api/v2/changepwd/admin"
-	healthzPath               = "/healthz"
-	webBasePath               = "/web"
-	webLoginPath              = "/web/login"
-	webLogoutPath             = "/web/logout"
-	webUsersPath              = "/web/users"
-	webUserPath               = "/web/user"
-	webConnectionsPath        = "/web/connections"
-	webFoldersPath            = "/web/folders"
-	webFolderPath             = "/web/folder"
-	webStatusPath             = "/web/status"
-	webAdminsPath             = "/web/admins"
-	webAdminPath              = "/web/admin"
-	webMaintenancePath        = "/web/maintenance"
-	webBackupPath             = "/web/backup"
-	webRestorePath            = "/web/restore"
-	webScanVFolderPath        = "/web/folder-quota-scans"
-	webQuotaScanPath          = "/web/quota-scans"
-	webChangeAdminPwdPath     = "/web/changepwd/admin"
-	webTemplateUser           = "/web/template/user"
-	webTemplateFolder         = "/web/template/folder"
-	webStaticFilesPath        = "/static"
+	logSender                       = "httpd"
+	tokenPath                       = "/api/v2/token"
+	logoutPath                      = "/api/v2/logout"
+	userTokenPath                   = "/api/v2/user/token"
+	userLogoutPath                  = "/api/v2/user/logout"
+	activeConnectionsPath           = "/api/v2/connections"
+	quotasBasePath                  = "/api/v2/quotas"
+	quotaScanPath                   = "/api/v2/quota-scans"
+	quotaScanVFolderPath            = "/api/v2/folder-quota-scans"
+	userPath                        = "/api/v2/users"
+	versionPath                     = "/api/v2/version"
+	folderPath                      = "/api/v2/folders"
+	serverStatusPath                = "/api/v2/status"
+	dumpDataPath                    = "/api/v2/dumpdata"
+	loadDataPath                    = "/api/v2/loaddata"
+	updateUsedQuotaPath             = "/api/v2/quota-update"
+	updateFolderUsedQuotaPath       = "/api/v2/folder-quota-update"
+	defenderHosts                   = "/api/v2/defender/hosts"
+	defenderBanTime                 = "/api/v2/defender/bantime"
+	defenderUnban                   = "/api/v2/defender/unban"
+	defenderScore                   = "/api/v2/defender/score"
+	adminPath                       = "/api/v2/admins"
+	adminPwdPath                    = "/api/v2/admin/changepwd"
+	adminPwdCompatPath              = "/api/v2/changepwd/admin"
+	userPwdPath                     = "/api/v2/user/changepwd"
+	userPublicKeysPath              = "/api/v2/user/publickeys"
+	userReadFolderPath              = "/api/v2/user/folder"
+	userGetFilePath                 = "/api/v2/user/file"
+	userStreamZipPath               = "/api/v2/user/streamzip"
+	healthzPath                     = "/healthz"
+	webRootPathDefault              = "/"
+	webBasePathDefault              = "/web"
+	webBasePathAdminDefault         = "/web/admin"
+	webBasePathClientDefault        = "/web/client"
+	webAdminSetupPathDefault        = "/web/admin/setup"
+	webLoginPathDefault             = "/web/admin/login"
+	webLogoutPathDefault            = "/web/admin/logout"
+	webUsersPathDefault             = "/web/admin/users"
+	webUserPathDefault              = "/web/admin/user"
+	webConnectionsPathDefault       = "/web/admin/connections"
+	webFoldersPathDefault           = "/web/admin/folders"
+	webFolderPathDefault            = "/web/admin/folder"
+	webStatusPathDefault            = "/web/admin/status"
+	webAdminsPathDefault            = "/web/admin/managers"
+	webAdminPathDefault             = "/web/admin/manager"
+	webMaintenancePathDefault       = "/web/admin/maintenance"
+	webBackupPathDefault            = "/web/admin/backup"
+	webRestorePathDefault           = "/web/admin/restore"
+	webScanVFolderPathDefault       = "/web/admin/quotas/scanfolder"
+	webQuotaScanPathDefault         = "/web/admin/quotas/scanuser"
+	webChangeAdminPwdPathDefault    = "/web/admin/changepwd"
+	webTemplateUserDefault          = "/web/admin/template/user"
+	webTemplateFolderDefault        = "/web/admin/template/folder"
+	webDefenderPathDefault          = "/web/admin/defender"
+	webDefenderHostsPathDefault     = "/web/admin/defender/hosts"
+	webClientLoginPathDefault       = "/web/client/login"
+	webClientFilesPathDefault       = "/web/client/files"
+	webClientDirContentsPathDefault = "/web/client/listdir"
+	webClientDownloadZipPathDefault = "/web/client/downloadzip"
+	webClientCredentialsPathDefault = "/web/client/credentials"
+	webChangeClientPwdPathDefault   = "/web/client/changepwd"
+	webChangeClientKeysPathDefault  = "/web/client/managekeys"
+	webClientLogoutPathDefault      = "/web/client/logout"
+	webStaticFilesPathDefault       = "/static"
 	// MaxRestoreSize defines the max size for the loaddata input file
-	MaxRestoreSize = 10485760 // 10 MB
-	maxRequestSize = 1048576  // 1MB
-	osWindows      = "windows"
+	MaxRestoreSize   = 10485760 // 10 MB
+	maxRequestSize   = 1048576  // 1MB
+	maxLoginPostSize = 262144   // 256 KB
+	osWindows        = "windows"
 )
 
 var (
-	backupsPath            string
-	certMgr                *common.CertManager
-	jwtTokensCleanupTicker *time.Ticker
-	jwtTokensCleanupDone   chan bool
-	invalidatedJWTTokens   sync.Map
-	csrfTokenAuth          *jwtauth.JWTAuth
+	backupsPath              string
+	certMgr                  *common.CertManager
+	jwtTokensCleanupTicker   *time.Ticker
+	jwtTokensCleanupDone     chan bool
+	invalidatedJWTTokens     sync.Map
+	csrfTokenAuth            *jwtauth.JWTAuth
+	webRootPath              string
+	webBasePath              string
+	webBaseAdminPath         string
+	webBaseClientPath        string
+	webAdminSetupPath        string
+	webLoginPath             string
+	webLogoutPath            string
+	webUsersPath             string
+	webUserPath              string
+	webConnectionsPath       string
+	webFoldersPath           string
+	webFolderPath            string
+	webStatusPath            string
+	webAdminsPath            string
+	webAdminPath             string
+	webMaintenancePath       string
+	webBackupPath            string
+	webRestorePath           string
+	webScanVFolderPath       string
+	webQuotaScanPath         string
+	webChangeAdminPwdPath    string
+	webTemplateUser          string
+	webTemplateFolder        string
+	webDefenderPath          string
+	webDefenderHostsPath     string
+	webClientLoginPath       string
+	webClientFilesPath       string
+	webClientDirContentsPath string
+	webClientDownloadZipPath string
+	webClientCredentialsPath string
+	webChangeClientPwdPath   string
+	webChangeClientKeysPath  string
+	webClientLogoutPath      string
+	webStaticFilesPath       string
 )
+
+func init() {
+	updateWebAdminURLs("")
+	updateWebClientURLs("")
+}
 
 // Binding defines the configuration for a network listener
 type Binding struct {
@@ -91,6 +157,9 @@ type Binding struct {
 	// Enable the built-in admin interface.
 	// You have to define TemplatesPath and StaticFilesPath for this to work
 	EnableWebAdmin bool `json:"enable_web_admin" mapstructure:"enable_web_admin"`
+	// Enable the built-in client interface.
+	// You have to define TemplatesPath and StaticFilesPath for this to work
+	EnableWebClient bool `json:"enable_web_client" mapstructure:"enable_web_client"`
 	// you also need to provide a certificate for enabling HTTPS
 	EnableHTTPS bool `json:"enable_https" mapstructure:"enable_https"`
 	// set to 1 to require client certificate authentication in addition to basic auth.
@@ -107,6 +176,19 @@ type Binding struct {
 	// any invalid name will be silently ignored.
 	// The order matters, the ciphers listed first will be the preferred ones.
 	TLSCipherSuites []string `json:"tls_cipher_suites" mapstructure:"tls_cipher_suites"`
+	// List of IP addresses and IP ranges allowed to set X-Forwarded-For, X-Real-IP,
+	// X-Forwarded-Proto headers.
+	ProxyAllowed     []string `json:"proxy_allowed" mapstructure:"proxy_allowed"`
+	allowHeadersFrom []func(net.IP) bool
+}
+
+func (b *Binding) parseAllowedProxy() error {
+	allowedFuncs, err := utils.ParseAllowedIPAndRanges(b.ProxyAllowed)
+	if err != nil {
+		return err
+	}
+	b.allowHeadersFrom = allowedFuncs
+	return nil
 }
 
 // GetAddress returns the binding address
@@ -155,6 +237,9 @@ type Conf struct {
 	BackupsPath string `json:"backups_path" mapstructure:"backups_path"`
 	// Jwt sign key for the api token and web admin cookie
 	JwtSignKey string `json:"jwt_sign_key" mapstructure:"jwt_sign_key"`
+	// Defines a base URL for the web admin and client interfaces. If empty web admin and client resources will
+	// be available at the root ("/") URI. If defined it must be an absolute URI or it will be ignored.
+	WebRoot string `json:"web_root" mapstructure:"web_root"`
 	// If files containing a certificate and matching private key for the server are provided the server will expect
 	// HTTPS connections.
 	// Certificate and key files can be reloaded on demand sending a "SIGHUP" signal on Unix based systems and a
@@ -184,26 +269,57 @@ func (c *Conf) ShouldBind() bool {
 	return false
 }
 
+func (c *Conf) isWebAdminEnabled() bool {
+	for _, binding := range c.Bindings {
+		if binding.EnableWebAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conf) isWebClientEnabled() bool {
+	for _, binding := range c.Bindings {
+		if binding.EnableWebClient {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conf) checkRequiredDirs(staticFilesPath, templatesPath string) error {
+	if (c.isWebAdminEnabled() || c.isWebClientEnabled()) && (staticFilesPath == "" || templatesPath == "") {
+		return fmt.Errorf("required directory is invalid, static file path: %#v template path: %#v",
+			staticFilesPath, templatesPath)
+	}
+	return nil
+}
+
 // Initialize configures and starts the HTTP server
 func (c *Conf) Initialize(configDir string) error {
 	logger.Debug(logSender, "", "initializing HTTP server with config %+v", c)
 	backupsPath = getConfigPath(c.BackupsPath, configDir)
 	staticFilesPath := getConfigPath(c.StaticFilesPath, configDir)
 	templatesPath := getConfigPath(c.TemplatesPath, configDir)
-	enableWebAdmin := staticFilesPath != "" || templatesPath != ""
 	if backupsPath == "" {
-		return fmt.Errorf("Required directory is invalid, backup path %#v", backupsPath)
+		return fmt.Errorf("required directory is invalid, backup path %#v", backupsPath)
 	}
-	if enableWebAdmin && (staticFilesPath == "" || templatesPath == "") {
-		return fmt.Errorf("Required directory is invalid, static file path: %#v template path: %#v",
-			staticFilesPath, templatesPath)
+	if err := c.checkRequiredDirs(staticFilesPath, templatesPath); err != nil {
+		return err
 	}
 	certificateFile := getConfigPath(c.CertificateFile, configDir)
 	certificateKeyFile := getConfigPath(c.CertificateKeyFile, configDir)
-	if enableWebAdmin {
-		loadTemplates(templatesPath)
+	if c.isWebAdminEnabled() {
+		updateWebAdminURLs(c.WebRoot)
+		loadAdminTemplates(templatesPath)
 	} else {
-		logger.Info(logSender, "", "built-in web interface disabled, please set templates_path and static_files_path to enable it")
+		logger.Info(logSender, "", "built-in web admin interface disabled")
+	}
+	if c.isWebClientEnabled() {
+		updateWebClientURLs(c.WebRoot)
+		loadClientTemplates(templatesPath)
+	} else {
+		logger.Info(logSender, "", "built-in web client interface disabled")
 	}
 	if certificateFile != "" && certificateKeyFile != "" {
 		mgr, err := common.NewCertManager(certificateFile, certificateKeyFile, configDir, logSender)
@@ -221,7 +337,7 @@ func (c *Conf) Initialize(configDir string) error {
 		certMgr = mgr
 	}
 
-	csrfTokenAuth = jwtauth.New("HS256", []byte(c.JwtSignKey), nil)
+	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), []byte(c.JwtSignKey), nil)
 
 	exitChannel := make(chan error, 1)
 
@@ -229,9 +345,12 @@ func (c *Conf) Initialize(configDir string) error {
 		if !binding.IsValid() {
 			continue
 		}
+		if err := binding.parseAllowedProxy(); err != nil {
+			return err
+		}
 
 		go func(b Binding) {
-			server := newHttpdServer(b, staticFilesPath, enableWebAdmin, c.JwtSignKey)
+			server := newHttpdServer(b, staticFilesPath, c.JwtSignKey)
 
 			exitChannel <- server.listenAndServe()
 		}(binding)
@@ -241,8 +360,12 @@ func (c *Conf) Initialize(configDir string) error {
 	return <-exitChannel
 }
 
-func isWebAdminRequest(r *http.Request) bool {
+func isWebRequest(r *http.Request) bool {
 	return strings.HasPrefix(r.RequestURI, webBasePath+"/")
+}
+
+func isWebClientRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.RequestURI, webBaseClientPath+"/")
 }
 
 // ReloadCertificateMgr reloads the certificate manager
@@ -300,14 +423,63 @@ func fileServer(r chi.Router, path string, root http.FileSystem) {
 	})
 }
 
+func updateWebClientURLs(baseURL string) {
+	if !path.IsAbs(baseURL) {
+		baseURL = "/"
+	}
+	webRootPath = path.Join(baseURL, webRootPathDefault)
+	webBasePath = path.Join(baseURL, webBasePathDefault)
+	webBaseClientPath = path.Join(baseURL, webBasePathClientDefault)
+	webClientLoginPath = path.Join(baseURL, webClientLoginPathDefault)
+	webClientFilesPath = path.Join(baseURL, webClientFilesPathDefault)
+	webClientDirContentsPath = path.Join(baseURL, webClientDirContentsPathDefault)
+	webClientDownloadZipPath = path.Join(baseURL, webClientDownloadZipPathDefault)
+	webClientCredentialsPath = path.Join(baseURL, webClientCredentialsPathDefault)
+	webChangeClientPwdPath = path.Join(baseURL, webChangeClientPwdPathDefault)
+	webChangeClientKeysPath = path.Join(baseURL, webChangeClientKeysPathDefault)
+	webClientLogoutPath = path.Join(baseURL, webClientLogoutPathDefault)
+}
+
+func updateWebAdminURLs(baseURL string) {
+	if !path.IsAbs(baseURL) {
+		baseURL = "/"
+	}
+	webRootPath = path.Join(baseURL, webRootPathDefault)
+	webBasePath = path.Join(baseURL, webBasePathDefault)
+	webBaseAdminPath = path.Join(baseURL, webBasePathAdminDefault)
+	webAdminSetupPath = path.Join(baseURL, webAdminSetupPathDefault)
+	webLoginPath = path.Join(baseURL, webLoginPathDefault)
+	webLogoutPath = path.Join(baseURL, webLogoutPathDefault)
+	webUsersPath = path.Join(baseURL, webUsersPathDefault)
+	webUserPath = path.Join(baseURL, webUserPathDefault)
+	webConnectionsPath = path.Join(baseURL, webConnectionsPathDefault)
+	webFoldersPath = path.Join(baseURL, webFoldersPathDefault)
+	webFolderPath = path.Join(baseURL, webFolderPathDefault)
+	webStatusPath = path.Join(baseURL, webStatusPathDefault)
+	webAdminsPath = path.Join(baseURL, webAdminsPathDefault)
+	webAdminPath = path.Join(baseURL, webAdminPathDefault)
+	webMaintenancePath = path.Join(baseURL, webMaintenancePathDefault)
+	webBackupPath = path.Join(baseURL, webBackupPathDefault)
+	webRestorePath = path.Join(baseURL, webRestorePathDefault)
+	webScanVFolderPath = path.Join(baseURL, webScanVFolderPathDefault)
+	webQuotaScanPath = path.Join(baseURL, webQuotaScanPathDefault)
+	webChangeAdminPwdPath = path.Join(baseURL, webChangeAdminPwdPathDefault)
+	webTemplateUser = path.Join(baseURL, webTemplateUserDefault)
+	webTemplateFolder = path.Join(baseURL, webTemplateFolderDefault)
+	webDefenderHostsPath = path.Join(baseURL, webDefenderHostsPathDefault)
+	webDefenderPath = path.Join(baseURL, webDefenderPathDefault)
+	webStaticFilesPath = path.Join(baseURL, webStaticFilesPathDefault)
+}
+
 // GetHTTPRouter returns an HTTP handler suitable to use for test cases
 func GetHTTPRouter() http.Handler {
 	b := Binding{
-		Address:        "",
-		Port:           8080,
-		EnableWebAdmin: true,
+		Address:         "",
+		Port:            8080,
+		EnableWebAdmin:  true,
+		EnableWebClient: true,
 	}
-	server := newHttpdServer(b, "../static", true, "test")
+	server := newHttpdServer(b, "../static", "test")
 	server.initializeRouter()
 	return server.router
 }

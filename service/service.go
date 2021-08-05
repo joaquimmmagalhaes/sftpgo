@@ -4,7 +4,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -132,6 +131,7 @@ func (s *Service) Start() error {
 	}
 
 	s.startServices()
+	go common.Config.ExecuteStartupHook() //nolint:errcheck
 
 	return nil
 }
@@ -145,7 +145,9 @@ func (s *Service) startServices() {
 
 	if sftpdConf.ShouldBind() {
 		go func() {
-			logger.Debug(logSender, "", "initializing SFTP server with config %+v", sftpdConf)
+			redactedConf := sftpdConf
+			redactedConf.KeyboardInteractiveHook = utils.GetRedactedURL(sftpdConf.KeyboardInteractiveHook)
+			logger.Debug(logSender, "", "initializing SFTP server with config %+v", redactedConf)
 			if err := sftpdConf.Initialize(s.ConfigDir); err != nil {
 				logger.Error(logSender, "", "could not start SFTP server: %v", err)
 				logger.ErrorToConsole("could not start SFTP server: %v", err)
@@ -248,7 +250,7 @@ func (s *Service) loadInitialData() error {
 		return fmt.Errorf("unable to restore input file %#v size too big: %v/%v bytes",
 			s.LoadDataFrom, info.Size(), httpd.MaxRestoreSize)
 	}
-	content, err := ioutil.ReadFile(s.LoadDataFrom)
+	content, err := os.ReadFile(s.LoadDataFrom)
 	if err != nil {
 		return fmt.Errorf("unable to read input file %#v: %v", s.LoadDataFrom, err)
 	}
@@ -256,7 +258,7 @@ func (s *Service) loadInitialData() error {
 	if err != nil {
 		return fmt.Errorf("unable to parse file to restore %#v: %v", s.LoadDataFrom, err)
 	}
-	err = s.restoreDump(dump)
+	err = s.restoreDump(&dump)
 	if err != nil {
 		return err
 	}
@@ -277,7 +279,7 @@ func (s *Service) loadInitialData() error {
 	return nil
 }
 
-func (s *Service) restoreDump(dump dataprovider.BackupData) error {
+func (s *Service) restoreDump(dump *dataprovider.BackupData) error {
 	err := httpd.RestoreAdmins(dump.Admins, s.LoadDataFrom, s.LoadDataMode)
 	if err != nil {
 		return fmt.Errorf("unable to restore admins from file %#v: %v", s.LoadDataFrom, err)

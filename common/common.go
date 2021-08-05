@@ -23,28 +23,34 @@ import (
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/metrics"
 	"github.com/drakkan/sftpgo/utils"
+	"github.com/drakkan/sftpgo/vfs"
 )
 
 // constants
 const (
-	logSender                = "common"
-	uploadLogSender          = "Upload"
-	downloadLogSender        = "Download"
-	renameLogSender          = "Rename"
-	rmdirLogSender           = "Rmdir"
-	mkdirLogSender           = "Mkdir"
-	symlinkLogSender         = "Symlink"
-	removeLogSender          = "Remove"
-	chownLogSender           = "Chown"
-	chmodLogSender           = "Chmod"
-	chtimesLogSender         = "Chtimes"
-	truncateLogSender        = "Truncate"
-	operationDownload        = "download"
-	operationUpload          = "upload"
-	operationDelete          = "delete"
-	operationPreDelete       = "pre-delete"
-	operationRename          = "rename"
-	operationSSHCmd          = "ssh_cmd"
+	logSender         = "common"
+	uploadLogSender   = "Upload"
+	downloadLogSender = "Download"
+	renameLogSender   = "Rename"
+	rmdirLogSender    = "Rmdir"
+	mkdirLogSender    = "Mkdir"
+	symlinkLogSender  = "Symlink"
+	removeLogSender   = "Remove"
+	chownLogSender    = "Chown"
+	chmodLogSender    = "Chmod"
+	chtimesLogSender  = "Chtimes"
+	truncateLogSender = "Truncate"
+	operationDownload = "download"
+	operationUpload   = "upload"
+	operationDelete   = "delete"
+	// Pre-download action name
+	OperationPreDownload = "pre-download"
+	// Pre-upload action name
+	OperationPreUpload = "pre-upload"
+	operationPreDelete = "pre-delete"
+	operationRename    = "rename"
+	// SSH command action name
+	OperationSSHCmd          = "ssh_cmd"
 	chtimesFormat            = "2006-01-02T15:04:05" // YYYY-MM-DDTHH:MM:SS
 	idleTimeoutCheckInterval = 3 * time.Minute
 )
@@ -70,6 +76,7 @@ const (
 	ProtocolSSH    = "SSH"
 	ProtocolFTP    = "FTP"
 	ProtocolWebDAV = "DAV"
+	ProtocolHTTP   = "HTTP"
 )
 
 // Upload modes
@@ -78,6 +85,12 @@ const (
 	UploadModeAtomic
 	UploadModeAtomicWithResume
 )
+
+func init() {
+	Connections.clients = clientsMap{
+		clients: make(map[string]int),
+	}
+}
 
 // errors definitions
 var (
@@ -90,6 +103,8 @@ var (
 	ErrConnectionDenied     = errors.New("you are not allowed to connect")
 	ErrNoBinding            = errors.New("no binding configured")
 	ErrCrtRevoked           = errors.New("your certificate has been revoked")
+	ErrNoCredentials        = errors.New("no credential provided")
+	ErrInternalFailure      = errors.New("internal failure")
 	errNoTransfer           = errors.New("requested transfer not found")
 	errTransferMismatch     = errors.New("transfer mismatch")
 )
@@ -103,7 +118,9 @@ var (
 	QuotaScans            ActiveScans
 	idleTimeoutTicker     *time.Ticker
 	idleTimeoutTickerDone chan bool
-	supportedProtocols    = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV}
+	supportedProtocols    = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV, ProtocolHTTP}
+	// the map key is the protocol, for each protocol we can have multiple rate limiters
+	rateLimiters map[string][]*rateLimiter
 )
 
 // Initialize sets the common configuration
@@ -123,7 +140,35 @@ func Initialize(c Configuration) error {
 		logger.Info(logSender, "", "defender initialized with config %+v", c.DefenderConfig)
 		Config.defender = defender
 	}
+	rateLimiters = make(map[string][]*rateLimiter)
+	for _, rlCfg := range c.RateLimitersConfig {
+		if rlCfg.isEnabled() {
+			if err := rlCfg.validate(); err != nil {
+				return fmt.Errorf("rate limiters initialization error: %v", err)
+			}
+			rateLimiter := rlCfg.getLimiter()
+			for _, protocol := range rlCfg.Protocols {
+				rateLimiters[protocol] = append(rateLimiters[protocol], rateLimiter)
+			}
+		}
+	}
+	vfs.SetTempPath(c.TempPath)
+	dataprovider.SetTempPath(c.TempPath)
 	return nil
+}
+
+// LimitRate blocks until all the configured rate limiters
+// allow one event to happen.
+// It returns an error if the time to wait exceeds the max
+// allowed delay
+func LimitRate(protocol, ip string) (time.Duration, error) {
+	for _, limiter := range rateLimiters[protocol] {
+		if delay, err := limiter.Wait(ip); err != nil {
+			logger.Debug(logSender, "", "protocol %v ip %v: %v", protocol, ip, err)
+			return delay, err
+		}
+	}
+	return 0, nil
 }
 
 // ReloadDefender reloads the defender's block and safe lists
@@ -154,13 +199,31 @@ func GetDefenderBanTime(ip string) *time.Time {
 	return Config.defender.GetBanTime(ip)
 }
 
-// Unban removes the specified IP address from the banned ones
-func Unban(ip string) bool {
+// GetDefenderHosts returns hosts that are banned or for which some violations have been detected
+func GetDefenderHosts() []*DefenderEntry {
+	if Config.defender == nil {
+		return nil
+	}
+
+	return Config.defender.GetHosts()
+}
+
+// GetDefenderHost returns a defender host by ip, if any
+func GetDefenderHost(ip string) (*DefenderEntry, error) {
+	if Config.defender == nil {
+		return nil, errors.New("defender is disabled")
+	}
+
+	return Config.defender.GetHost(ip)
+}
+
+// DeleteDefenderHost removes the specified IP address from the defender lists
+func DeleteDefenderHost(ip string) bool {
 	if Config.defender == nil {
 		return false
 	}
 
-	return Config.defender.Unban(ip)
+	return Config.defender.DeleteHost(ip)
 }
 
 // GetDefenderScore returns the score for the given IP
@@ -295,6 +358,12 @@ type Configuration struct {
 	// 2 means "ignore mode for cloud fs": requests for changing permissions and owner/group/time are
 	// silently ignored for cloud based filesystem such as S3, GCS, Azure Blob
 	SetstatMode int `json:"setstat_mode" mapstructure:"setstat_mode"`
+	// TempPath defines the path for temporary files such as those used for atomic uploads or file pipes.
+	// If you set this option you must make sure that the defined path exists, is accessible for writing
+	// by the user running SFTPGo, and is on the same filesystem as the users home directories otherwise
+	// the renaming for atomic uploads will become a copy and therefore may take a long time.
+	// The temporary files are not namespaced. The default is generally fine. Leave empty for the default.
+	TempPath string `json:"temp_path" mapstructure:"temp_path"`
 	// Support for HAProxy PROXY protocol.
 	// If you are running SFTPGo behind a proxy server such as HAProxy, AWS ELB or NGNIX, you can enable
 	// the proxy protocol. It provides a convenient way to safely transport connection information
@@ -312,14 +381,23 @@ type Configuration struct {
 	// If proxy protocol is set to 2 and we receive a proxy header from an IP that is not in the list then the
 	// connection will be rejected.
 	ProxyAllowed []string `json:"proxy_allowed" mapstructure:"proxy_allowed"`
+	// Absolute path to an external program or an HTTP URL to invoke as soon as SFTPGo starts.
+	// If you define an HTTP URL it will be invoked using a `GET` request.
+	// Please note that SFTPGo services may not yet be available when this hook is run.
+	// Leave empty do disable.
+	StartupHook string `json:"startup_hook" mapstructure:"startup_hook"`
 	// Absolute path to an external program or an HTTP URL to invoke after a user connects
 	// and before he tries to login. It allows you to reject the connection based on the source
 	// ip address. Leave empty do disable.
 	PostConnectHook string `json:"post_connect_hook" mapstructure:"post_connect_hook"`
 	// Maximum number of concurrent client connections. 0 means unlimited
 	MaxTotalConnections int `json:"max_total_connections" mapstructure:"max_total_connections"`
+	// Maximum number of concurrent client connections from the same host (IP). 0 means unlimited
+	MaxPerHostConnections int `json:"max_per_host_connections" mapstructure:"max_per_host_connections"`
 	// Defender configuration
-	DefenderConfig        DefenderConfig `json:"defender" mapstructure:"defender"`
+	DefenderConfig DefenderConfig `json:"defender" mapstructure:"defender"`
+	// Rate limiter configurations
+	RateLimitersConfig    []RateLimiterConfig `json:"rate_limiters" mapstructure:"rate_limiters"`
 	idleTimeoutAsDuration time.Duration
 	idleLoginTimeout      time.Duration
 	defender              Defender
@@ -363,6 +441,42 @@ func (c *Configuration) GetProxyListener(listener net.Listener) (*proxyproto.Lis
 	return proxyListener, nil
 }
 
+// ExecuteStartupHook runs the startup hook if defined
+func (c *Configuration) ExecuteStartupHook() error {
+	if c.StartupHook == "" {
+		return nil
+	}
+	if strings.HasPrefix(c.StartupHook, "http") {
+		var url *url.URL
+		url, err := url.Parse(c.StartupHook)
+		if err != nil {
+			logger.Warn(logSender, "", "Invalid startup hook %#v: %v", c.StartupHook, err)
+			return err
+		}
+		startTime := time.Now()
+		resp, err := httpclient.RetryableGet(url.String())
+		if err != nil {
+			logger.Warn(logSender, "", "Error executing startup hook: %v", err)
+			return err
+		}
+		defer resp.Body.Close()
+		logger.Debug(logSender, "", "Startup hook executed, elapsed: %v, response code: %v", time.Since(startTime), resp.StatusCode)
+		return nil
+	}
+	if !filepath.IsAbs(c.StartupHook) {
+		err := fmt.Errorf("invalid startup hook %#v", c.StartupHook)
+		logger.Warn(logSender, "", "Invalid startup hook %#v", c.StartupHook)
+		return err
+	}
+	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.StartupHook)
+	err := cmd.Run()
+	logger.Debug(logSender, "", "Startup hook executed, elapsed: %v, error: %v", time.Since(startTime), err)
+	return nil
+}
+
 // ExecutePostConnectHook executes the post connect hook if defined
 func (c *Configuration) ExecutePostConnectHook(ipAddr, protocol string) error {
 	if c.PostConnectHook == "" {
@@ -376,13 +490,12 @@ func (c *Configuration) ExecutePostConnectHook(ipAddr, protocol string) error {
 				ipAddr, c.PostConnectHook, err)
 			return err
 		}
-		httpClient := httpclient.GetRetraybleHTTPClient()
 		q := url.Query()
 		q.Add("ip", ipAddr)
 		q.Add("protocol", protocol)
 		url.RawQuery = q.Encode()
 
-		resp, err := httpClient.Get(url.String())
+		resp, err := httpclient.RetryableGet(url.String())
 		if err != nil {
 			logger.Warn(protocol, "", "Login from ip %#v denied, error executing post connect hook: %v", ipAddr, err)
 			return err
@@ -451,6 +564,9 @@ func (c *SSHConnection) Close() error {
 
 // ActiveConnections holds the currect active connections with the associated transfers
 type ActiveConnections struct {
+	// clients contains both authenticated and estabilished connections and the ones waiting
+	// for authentication
+	clients clientsMap
 	sync.RWMutex
 	connections    []ActiveConnection
 	sshConnections []*SSHConnection
@@ -617,16 +733,51 @@ func (conns *ActiveConnections) checkIdles() {
 	conns.RUnlock()
 }
 
+// AddClientConnection stores a new client connection
+func (conns *ActiveConnections) AddClientConnection(ipAddr string) {
+	conns.clients.add(ipAddr)
+}
+
+// RemoveClientConnection removes a disconnected client from the tracked ones
+func (conns *ActiveConnections) RemoveClientConnection(ipAddr string) {
+	conns.clients.remove(ipAddr)
+}
+
+// GetClientConnections returns the total number of client connections
+func (conns *ActiveConnections) GetClientConnections() int32 {
+	return conns.clients.getTotal()
+}
+
 // IsNewConnectionAllowed returns false if the maximum number of concurrent allowed connections is exceeded
-func (conns *ActiveConnections) IsNewConnectionAllowed() bool {
-	if Config.MaxTotalConnections == 0 {
+func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr string) bool {
+	if Config.MaxTotalConnections == 0 && Config.MaxPerHostConnections == 0 {
 		return true
 	}
 
-	conns.RLock()
-	defer conns.RUnlock()
+	if Config.MaxPerHostConnections > 0 {
+		if total := conns.clients.getTotalFrom(ipAddr); total > Config.MaxPerHostConnections {
+			logger.Debug(logSender, "", "active connections from %v %v/%v", ipAddr, total, Config.MaxPerHostConnections)
+			AddDefenderEvent(ipAddr, HostEventLimitExceeded)
+			return false
+		}
+	}
 
-	return len(conns.connections) < Config.MaxTotalConnections
+	if Config.MaxTotalConnections > 0 {
+		if total := conns.clients.getTotal(); total > int32(Config.MaxTotalConnections) {
+			logger.Debug(logSender, "", "active client connections %v/%v", total, Config.MaxTotalConnections)
+			return false
+		}
+
+		// on a single SFTP connection we could have multiple SFTP channels or commands
+		// so we check the estabilished connections too
+
+		conns.RLock()
+		defer conns.RUnlock()
+
+		return len(conns.connections) < Config.MaxTotalConnections
+	}
+
+	return true
 }
 
 // GetStats returns stats for active connections

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -35,8 +34,10 @@ var (
 
 // GCSFs is a Fs implementation for Google Cloud Storage.
 type GCSFs struct {
-	connectionID   string
-	localTempDir   string
+	connectionID string
+	localTempDir string
+	// if not empty this fs is mouted as virtual folder in the specified path
+	mountPath      string
 	config         *GCSFsConfig
 	svc            *storage.Client
 	ctxTimeout     time.Duration
@@ -48,11 +49,20 @@ func init() {
 }
 
 // NewGCSFs returns an GCSFs object that allows to interact with Google Cloud Storage
-func NewGCSFs(connectionID, localTempDir string, config GCSFsConfig) (Fs, error) {
+func NewGCSFs(connectionID, localTempDir, mountPath string, config GCSFsConfig) (Fs, error) {
+	if localTempDir == "" {
+		if tempPath != "" {
+			localTempDir = tempPath
+		} else {
+			localTempDir = filepath.Clean(os.TempDir())
+		}
+	}
+
 	var err error
 	fs := &GCSFs{
 		connectionID:   connectionID,
 		localTempDir:   localTempDir,
+		mountPath:      mountPath,
 		config:         &config,
 		ctxTimeout:     30 * time.Second,
 		ctxLongTimeout: 300 * time.Second,
@@ -64,16 +74,14 @@ func NewGCSFs(connectionID, localTempDir string, config GCSFsConfig) (Fs, error)
 	if fs.config.AutomaticCredentials > 0 {
 		fs.svc, err = storage.NewClient(ctx)
 	} else if !fs.config.Credentials.IsEmpty() {
-		if fs.config.Credentials.IsEncrypted() {
-			err = fs.config.Credentials.Decrypt()
-			if err != nil {
-				return fs, err
-			}
+		err = fs.config.Credentials.TryDecrypt()
+		if err != nil {
+			return fs, err
 		}
 		fs.svc, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(fs.config.Credentials.GetPayload())))
 	} else {
 		var creds []byte
-		creds, err = ioutil.ReadFile(fs.config.CredentialFile)
+		creds, err = os.ReadFile(fs.config.CredentialFile)
 		if err != nil {
 			return fs, err
 		}
@@ -103,48 +111,18 @@ func (fs *GCSFs) ConnectionID() string {
 
 // Stat returns a FileInfo describing the named file
 func (fs *GCSFs) Stat(name string) (os.FileInfo, error) {
-	var result *FileInfo
-	var err error
 	if name == "" || name == "." {
 		err := fs.checkIfBucketExists()
 		if err != nil {
-			return result, err
+			return nil, err
 		}
 		return NewFileInfo(name, true, 0, time.Now(), false), nil
 	}
 	if fs.config.KeyPrefix == name+"/" {
 		return NewFileInfo(name, true, 0, time.Now(), false), nil
 	}
-	attrs, err := fs.headObject(name)
-	if err == nil {
-		objSize := attrs.Size
-		objectModTime := attrs.Updated
-		isDir := attrs.ContentType == dirMimeType || strings.HasSuffix(attrs.Name, "/")
-		return NewFileInfo(name, isDir, objSize, objectModTime, false), nil
-	}
-	if !fs.IsNotExist(err) {
-		return result, err
-	}
-	// now check if this is a prefix (virtual directory)
-	hasContents, err := fs.hasContents(name)
-	if err == nil && hasContents {
-		return NewFileInfo(name, true, 0, time.Now(), false), nil
-	} else if err != nil {
-		return nil, err
-	}
-	// search a dir ending with "/" for backward compatibility
-	return fs.getStatCompat(name)
-}
-
-func (fs *GCSFs) getStatCompat(name string) (os.FileInfo, error) {
-	var result *FileInfo
-	attrs, err := fs.headObject(name + "/")
-	if err != nil {
-		return result, err
-	}
-	objSize := attrs.Size
-	objectModTime := attrs.Updated
-	return NewFileInfo(name, true, objSize, objectModTime, false), nil
+	_, info, err := fs.getObjectStat(name)
+	return info, err
 }
 
 // Lstat returns a FileInfo describing the named file
@@ -163,7 +141,7 @@ func (fs *GCSFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, fu
 	ctx, cancelFn := context.WithCancel(context.Background())
 	objectReader, err := obj.NewRangeReader(ctx, offset, -1)
 	if err == nil && offset > 0 && objectReader.Attrs.ContentEncoding == "gzip" {
-		err = fmt.Errorf("Range request is not possible for gzip content encoding, requested offset %v", offset)
+		err = fmt.Errorf("range request is not possible for gzip content encoding, requested offset %v", offset)
 		objectReader.Close()
 	}
 	if err != nil {
@@ -239,7 +217,7 @@ func (fs *GCSFs) Rename(source, target string) error {
 	if source == target {
 		return nil
 	}
-	fi, err := fs.Stat(source)
+	realSourceName, fi, err := fs.getObjectStat(source)
 	if err != nil {
 		return err
 	}
@@ -249,10 +227,13 @@ func (fs *GCSFs) Rename(source, target string) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot rename non empty directory: %#v", source)
+			return fmt.Errorf("cannot rename non empty directory: %#v", source)
+		}
+		if !strings.HasSuffix(target, "/") {
+			target += "/"
 		}
 	}
-	src := fs.svc.Bucket(fs.config.Bucket).Object(source)
+	src := fs.svc.Bucket(fs.config.Bucket).Object(realSourceName)
 	dst := fs.svc.Bucket(fs.config.Bucket).Object(target)
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
@@ -285,19 +266,21 @@ func (fs *GCSFs) Remove(name string, isDir bool) error {
 			return err
 		}
 		if hasContents {
-			return fmt.Errorf("Cannot remove non empty directory: %#v", name)
+			return fmt.Errorf("cannot remove non empty directory: %#v", name)
+		}
+		if !strings.HasSuffix(name, "/") {
+			name += "/"
 		}
 	}
 	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
 	defer cancelFn()
 
 	err := fs.svc.Bucket(fs.config.Bucket).Object(name).Delete(ctx)
-	metrics.GCSDeleteObjectCompleted(err)
 	if fs.IsNotExist(err) && isDir {
-		name = name + "/"
-		err = fs.svc.Bucket(fs.config.Bucket).Object(name).Delete(ctx)
-		metrics.GCSDeleteObjectCompleted(err)
+		// we can have directories without a trailing "/" (created using v2.1.0 and before)
+		err = fs.svc.Bucket(fs.config.Bucket).Object(strings.TrimSuffix(name, "/")).Delete(ctx)
 	}
+	metrics.GCSDeleteObjectCompleted(err)
 	return err
 }
 
@@ -307,11 +290,19 @@ func (fs *GCSFs) Mkdir(name string) error {
 	if !fs.IsNotExist(err) {
 		return err
 	}
+	if !strings.HasSuffix(name, "/") {
+		name += "/"
+	}
 	_, w, _, err := fs.Create(name, -1, nil)
 	if err != nil {
 		return err
 	}
 	return w.Close()
+}
+
+// MkdirAll does nothing, we don't have folder
+func (*GCSFs) MkdirAll(name string, uid int, gid int) error {
+	return nil
 }
 
 // Symlink creates source as a symbolic link to target.
@@ -410,8 +401,8 @@ func (fs *GCSFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return result, nil
 }
 
-// IsUploadResumeSupported returns true if upload resume is supported.
-// SFTP Resume is not supported on S3
+// IsUploadResumeSupported returns true if resuming uploads is supported.
+// Resuming uploads is not supported on GCS
 func (*GCSFs) IsUploadResumeSupported() bool {
 	return false
 }
@@ -465,7 +456,7 @@ func (*GCSFs) IsNotSupported(err error) bool {
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *GCSFs) CheckRootPath(username string, uid int, gid int) bool {
 	// we need a local directory for temporary files
-	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, nil)
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
 	return osFs.CheckRootPath(username, uid, gid)
 }
 
@@ -533,6 +524,9 @@ func (fs *GCSFs) GetRelativePath(name string) string {
 			rel = "/"
 		}
 		rel = path.Clean("/" + strings.TrimPrefix(rel, "/"+fs.config.KeyPrefix))
+	}
+	if fs.mountPath != "" {
+		rel = path.Join(fs.mountPath, rel)
 	}
 	return rel
 }
@@ -602,6 +596,9 @@ func (GCSFs) HasVirtualFolders() bool {
 
 // ResolvePath returns the matching filesystem path for the specified virtual path
 func (fs *GCSFs) ResolvePath(virtualPath string) (string, error) {
+	if fs.mountPath != "" {
+		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
+	}
 	if !path.IsAbs(virtualPath) {
 		virtualPath = path.Clean("/" + virtualPath)
 	}
@@ -615,6 +612,36 @@ func (fs *GCSFs) resolve(name string, prefix string) (string, bool) {
 		result = strings.TrimSuffix(result, "/")
 	}
 	return result, isDir
+}
+
+// getObjectStat returns the stat result and the real object name as first value
+func (fs *GCSFs) getObjectStat(name string) (string, os.FileInfo, error) {
+	attrs, err := fs.headObject(name)
+	if err == nil {
+		objSize := attrs.Size
+		objectModTime := attrs.Updated
+		isDir := attrs.ContentType == dirMimeType || strings.HasSuffix(attrs.Name, "/")
+		return name, NewFileInfo(name, isDir, objSize, objectModTime, false), nil
+	}
+	if !fs.IsNotExist(err) {
+		return "", nil, err
+	}
+	// now check if this is a prefix (virtual directory)
+	hasContents, err := fs.hasContents(name)
+	if err != nil {
+		return "", nil, err
+	}
+	if hasContents {
+		return name, NewFileInfo(name, true, 0, time.Now(), false), nil
+	}
+	// finally check if this is an object with a trailing /
+	attrs, err = fs.headObject(name + "/")
+	if err != nil {
+		return "", nil, err
+	}
+	objSize := attrs.Size
+	objectModTime := attrs.Updated
+	return name + "/", NewFileInfo(name, true, objSize, objectModTime, false), nil
 }
 
 func (fs *GCSFs) checkIfBucketExists() error {

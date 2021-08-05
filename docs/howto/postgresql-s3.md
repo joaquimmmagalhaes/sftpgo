@@ -188,19 +188,19 @@ sudo systemctl restart sftpgo
 systemctl status sftpgo
 ```
 
+## Create the first admin
+
+To start using SFTPGo you need to create an admin user, the easiest way is to use the built-in Web admin interface, so open the Web Admin URL and create the first admin user.
+
+[http://127.0.0.1:8080/web/admin](http://127.0.0.1:8080/web/admin)
+
 ## Add virtual users
 
 The easiest way to add virtual users is to use the built-in Web interface.
 
-You can expose the Web Admin interface over the network replacing `"bind_address": "127.0.0.1"` in the `httpd` configuration section with `"bind_address": ""` and apply the change restarting the SFTPGo service with the following command.
+So navigate to the Web Admin URL again and log in using the credentials you just set up.
 
-```shell
-sudo systemctl restart sftpgo
-```
-
-So now open the Web Admin URL.
-
-[http://127.0.0.1:8080/web](http://127.0.0.1:8080/web)
+[http://127.0.0.1:8080/web/admin](http://127.0.0.1:8080/web/admin)
 
 Click `Add` and fill the user details, the minimum required parameters are:
 

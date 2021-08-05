@@ -2,9 +2,9 @@ package common
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,27 +32,28 @@ func TestBasicDefender(t *testing.T) {
 	data, err := json.Marshal(bl)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(blFile, data, os.ModePerm)
+	err = os.WriteFile(blFile, data, os.ModePerm)
 	assert.NoError(t, err)
 
 	data, err = json.Marshal(sl)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(slFile, data, os.ModePerm)
+	err = os.WriteFile(slFile, data, os.ModePerm)
 	assert.NoError(t, err)
 
 	config := &DefenderConfig{
-		Enabled:          true,
-		BanTime:          10,
-		BanTimeIncrement: 2,
-		Threshold:        5,
-		ScoreInvalid:     2,
-		ScoreValid:       1,
-		ObservationTime:  15,
-		EntriesSoftLimit: 1,
-		EntriesHardLimit: 2,
-		SafeListFile:     "slFile",
-		BlockListFile:    "blFile",
+		Enabled:            true,
+		BanTime:            10,
+		BanTimeIncrement:   2,
+		Threshold:          5,
+		ScoreInvalid:       2,
+		ScoreValid:         1,
+		ScoreLimitExceeded: 3,
+		ObservationTime:    15,
+		EntriesSoftLimit:   1,
+		EntriesHardLimit:   2,
+		SafeListFile:       "slFile",
+		BlockListFile:      "blFile",
 	}
 
 	_, err = newInMemoryDefender(config)
@@ -72,9 +73,13 @@ func TestBasicDefender(t *testing.T) {
 	assert.False(t, defender.IsBanned("invalid ip"))
 	assert.Equal(t, 0, defender.countBanned())
 	assert.Equal(t, 0, defender.countHosts())
+	assert.Len(t, defender.GetHosts(), 0)
+	_, err = defender.GetHost("10.8.0.4")
+	assert.Error(t, err)
 
 	defender.AddEvent("172.16.1.4", HostEventLoginFailed)
 	defender.AddEvent("192.168.8.4", HostEventUserNotFound)
+	defender.AddEvent("172.16.1.3", HostEventLimitExceeded)
 	assert.Equal(t, 0, defender.countHosts())
 
 	testIP := "12.34.56.78"
@@ -82,16 +87,39 @@ func TestBasicDefender(t *testing.T) {
 	assert.Equal(t, 1, defender.countHosts())
 	assert.Equal(t, 0, defender.countBanned())
 	assert.Equal(t, 1, defender.GetScore(testIP))
+	if assert.Len(t, defender.GetHosts(), 1) {
+		assert.Equal(t, 1, defender.GetHosts()[0].Score)
+		assert.True(t, defender.GetHosts()[0].BanTime.IsZero())
+		assert.Empty(t, defender.GetHosts()[0].GetBanTime())
+	}
+	host, err := defender.GetHost(testIP)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, host.Score)
+	assert.Empty(t, host.GetBanTime())
 	assert.Nil(t, defender.GetBanTime(testIP))
-	defender.AddEvent(testIP, HostEventNoLoginTried)
+	defender.AddEvent(testIP, HostEventLimitExceeded)
 	assert.Equal(t, 1, defender.countHosts())
 	assert.Equal(t, 0, defender.countBanned())
-	assert.Equal(t, 3, defender.GetScore(testIP))
+	assert.Equal(t, 4, defender.GetScore(testIP))
+	if assert.Len(t, defender.GetHosts(), 1) {
+		assert.Equal(t, 4, defender.GetHosts()[0].Score)
+	}
+	defender.AddEvent(testIP, HostEventNoLoginTried)
 	defender.AddEvent(testIP, HostEventNoLoginTried)
 	assert.Equal(t, 0, defender.countHosts())
 	assert.Equal(t, 1, defender.countBanned())
 	assert.Equal(t, 0, defender.GetScore(testIP))
 	assert.NotNil(t, defender.GetBanTime(testIP))
+	if assert.Len(t, defender.GetHosts(), 1) {
+		assert.Equal(t, 0, defender.GetHosts()[0].Score)
+		assert.False(t, defender.GetHosts()[0].BanTime.IsZero())
+		assert.NotEmpty(t, defender.GetHosts()[0].GetBanTime())
+		assert.Equal(t, hex.EncodeToString([]byte(testIP)), defender.GetHosts()[0].GetID())
+	}
+	host, err = defender.GetHost(testIP)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, host.Score)
+	assert.NotEmpty(t, host.GetBanTime())
 
 	// now test cleanup, testIP is already banned
 	testIP1 := "12.34.56.79"
@@ -142,13 +170,84 @@ func TestBasicDefender(t *testing.T) {
 		assert.True(t, newBanTime.After(*banTime))
 	}
 
-	assert.True(t, defender.Unban(testIP3))
-	assert.False(t, defender.Unban(testIP3))
+	assert.True(t, defender.DeleteHost(testIP3))
+	assert.False(t, defender.DeleteHost(testIP3))
 
 	err = os.Remove(slFile)
 	assert.NoError(t, err)
 	err = os.Remove(blFile)
 	assert.NoError(t, err)
+}
+
+func TestExpiredHostBans(t *testing.T) {
+	config := &DefenderConfig{
+		Enabled:            true,
+		BanTime:            10,
+		BanTimeIncrement:   2,
+		Threshold:          5,
+		ScoreInvalid:       2,
+		ScoreValid:         1,
+		ScoreLimitExceeded: 3,
+		ObservationTime:    15,
+		EntriesSoftLimit:   1,
+		EntriesHardLimit:   2,
+	}
+
+	d, err := newInMemoryDefender(config)
+	assert.NoError(t, err)
+
+	defender := d.(*memoryDefender)
+
+	testIP := "1.2.3.4"
+	defender.banned[testIP] = time.Now().Add(-24 * time.Hour)
+
+	// the ban is expired testIP should not be listed
+	res := defender.GetHosts()
+	assert.Len(t, res, 0)
+
+	assert.False(t, defender.IsBanned(testIP))
+	_, err = defender.GetHost(testIP)
+	assert.Error(t, err)
+	_, ok := defender.banned[testIP]
+	assert.True(t, ok)
+	// now add an event for an expired banned ip, it should be removed
+	defender.AddEvent(testIP, HostEventLoginFailed)
+	assert.False(t, defender.IsBanned(testIP))
+	entry, err := defender.GetHost(testIP)
+	assert.NoError(t, err)
+	assert.Equal(t, testIP, entry.IP)
+	assert.Empty(t, entry.GetBanTime())
+	assert.Equal(t, 1, entry.Score)
+
+	res = defender.GetHosts()
+	if assert.Len(t, res, 1) {
+		assert.Equal(t, testIP, res[0].IP)
+		assert.Empty(t, res[0].GetBanTime())
+		assert.Equal(t, 1, res[0].Score)
+	}
+
+	events := []hostEvent{
+		{
+			dateTime: time.Now().Add(-24 * time.Hour),
+			score:    2,
+		},
+		{
+			dateTime: time.Now().Add(-24 * time.Hour),
+			score:    3,
+		},
+	}
+
+	hs := hostScore{
+		Events:     events,
+		TotalScore: 5,
+	}
+
+	defender.hosts[testIP] = hs
+	// the recorded scored are too old
+	res = defender.GetHosts()
+	assert.Len(t, res, 0)
+	_, err = defender.GetHost(testIP)
+	assert.Error(t, err)
 }
 
 func TestLoadHostListFromFile(t *testing.T) {
@@ -160,7 +259,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 	_, err = rand.Read(content)
 	assert.NoError(t, err)
 
-	err = ioutil.WriteFile(hostsFilePath, content, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, content, os.ModePerm)
 	assert.NoError(t, err)
 
 	_, err = loadHostListFromFile(hostsFilePath)
@@ -173,7 +272,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 
 	asJSON, err := json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err := loadHostListFromFile(hostsFilePath)
@@ -183,7 +282,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 	hl.IPAddresses = append(hl.IPAddresses, "invalidip")
 	asJSON, err = json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err = loadHostListFromFile(hostsFilePath)
@@ -195,7 +294,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 
 	asJSON, err = json.Marshal(hl)
 	assert.NoError(t, err)
-	err = ioutil.WriteFile(hostsFilePath, asJSON, os.ModePerm)
+	err = os.WriteFile(hostsFilePath, asJSON, os.ModePerm)
 	assert.NoError(t, err)
 
 	hostList, err = loadHostListFromFile(hostsFilePath)
@@ -215,7 +314,7 @@ func TestLoadHostListFromFile(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	err = ioutil.WriteFile(hostsFilePath, []byte("non json content"), os.ModePerm)
+	err = os.WriteFile(hostsFilePath, []byte("non json content"), os.ModePerm)
 	assert.NoError(t, err)
 	_, err = loadHostListFromFile(hostsFilePath)
 	assert.Error(t, err)
@@ -316,6 +415,11 @@ func TestDefenderConfig(t *testing.T) {
 	require.Error(t, err)
 
 	c.ScoreInvalid = 2
+	c.ScoreLimitExceeded = 10
+	err = c.validate()
+	require.Error(t, err)
+
+	c.ScoreLimitExceeded = 2
 	c.ScoreValid = 10
 	err = c.validate()
 	require.Error(t, err)

@@ -27,7 +27,37 @@ var (
 	validAzAccessTier = []string{"", "Archive", "Hot", "Cool"}
 	// ErrStorageSizeUnavailable is returned if the storage backend does not support getting the size
 	ErrStorageSizeUnavailable = errors.New("unable to get available size for this storage backend")
+	// ErrVfsUnsupported defines the error for an unsupported VFS operation
+	ErrVfsUnsupported  = errors.New("not supported")
+	credentialsDirPath string
+	tempPath           string
+	sftpFingerprints   []string
 )
+
+// SetCredentialsDirPath sets the credentials dir path
+func SetCredentialsDirPath(credentialsPath string) {
+	credentialsDirPath = credentialsPath
+}
+
+// GetCredentialsDirPath returns the credentials dir path
+func GetCredentialsDirPath() string {
+	return credentialsDirPath
+}
+
+// SetTempPath sets the path for temporary files
+func SetTempPath(fsPath string) {
+	tempPath = fsPath
+}
+
+// GetTempPath returns the path for temporary files
+func GetTempPath() string {
+	return tempPath
+}
+
+// SetSFTPFingerprints sets the SFTP host key fingerprints
+func SetSFTPFingerprints(fp []string) {
+	sftpFingerprints = fp
+}
 
 // Fs defines the interface for filesystem backends
 type Fs interface {
@@ -40,6 +70,7 @@ type Fs interface {
 	Rename(source, target string) error
 	Remove(name string, isDir bool) error
 	Mkdir(name string) error
+	MkdirAll(name string, uid int, gid int) error
 	Symlink(source, target string) error
 	Chown(name string, uid int, gid int) error
 	Chmod(name string, mode os.FileMode) error
@@ -78,9 +109,6 @@ type File interface {
 	Name() string
 	Truncate(size int64) error
 }
-
-// ErrVfsUnsupported defines the error for an unsupported VFS operation
-var ErrVfsUnsupported = errors.New("Not supported")
 
 // QuotaCheckResult defines the result for a quota check
 type QuotaCheckResult struct {
@@ -134,6 +162,40 @@ type S3FsConfig struct {
 	UploadPartSize int64 `json:"upload_part_size,omitempty"`
 	// How many parts are uploaded in parallel
 	UploadConcurrency int `json:"upload_concurrency,omitempty"`
+}
+
+func (c *S3FsConfig) isEqual(other *S3FsConfig) bool {
+	if c.Bucket != other.Bucket {
+		return false
+	}
+	if c.KeyPrefix != other.KeyPrefix {
+		return false
+	}
+	if c.Region != other.Region {
+		return false
+	}
+	if c.AccessKey != other.AccessKey {
+		return false
+	}
+	if c.Endpoint != other.Endpoint {
+		return false
+	}
+	if c.StorageClass != other.StorageClass {
+		return false
+	}
+	if c.UploadPartSize != other.UploadPartSize {
+		return false
+	}
+	if c.UploadConcurrency != other.UploadConcurrency {
+		return false
+	}
+	if c.AccessSecret == nil {
+		c.AccessSecret = kms.NewEmptySecret()
+	}
+	if other.AccessSecret == nil {
+		other.AccessSecret = kms.NewEmptySecret()
+	}
+	return c.AccessSecret.IsEqual(other.AccessSecret)
 }
 
 func (c *S3FsConfig) checkCredentials() error {
@@ -213,6 +275,28 @@ type GCSFsConfig struct {
 	StorageClass         string `json:"storage_class,omitempty"`
 }
 
+func (c *GCSFsConfig) isEqual(other *GCSFsConfig) bool {
+	if c.Bucket != other.Bucket {
+		return false
+	}
+	if c.KeyPrefix != other.KeyPrefix {
+		return false
+	}
+	if c.AutomaticCredentials != other.AutomaticCredentials {
+		return false
+	}
+	if c.StorageClass != other.StorageClass {
+		return false
+	}
+	if c.Credentials == nil {
+		c.Credentials = kms.NewEmptySecret()
+	}
+	if other.Credentials == nil {
+		other.Credentials = kms.NewEmptySecret()
+	}
+	return c.Credentials.IsEqual(other.Credentials)
+}
+
 // Validate returns an error if the configuration is not valid
 func (c *GCSFsConfig) Validate(credentialsFilePath string) error {
 	if c.Credentials == nil {
@@ -258,9 +342,9 @@ type AzBlobFsConfig struct {
 	// for example "http://127.0.0.1:10000"
 	Endpoint string `json:"endpoint,omitempty"`
 	// Shared access signature URL, leave blank if using account/key
-	SASURL string `json:"sas_url,omitempty"`
+	SASURL *kms.Secret `json:"sas_url,omitempty"`
 	// KeyPrefix is similar to a chroot directory for local filesystem.
-	// If specified then the SFTPGo userd will only see objects that starts
+	// If specified then the SFTPGo user will only see objects that starts
 	// with this prefix and so you can restrict access to a specific
 	// folder. The prefix, if not empty, must not start with "/" and must
 	// end with "/".
@@ -282,6 +366,49 @@ type AzBlobFsConfig struct {
 	AccessTier string `json:"access_tier,omitempty"`
 }
 
+func (c *AzBlobFsConfig) isEqual(other *AzBlobFsConfig) bool {
+	if c.Container != other.Container {
+		return false
+	}
+	if c.AccountName != other.AccountName {
+		return false
+	}
+	if c.Endpoint != other.Endpoint {
+		return false
+	}
+	if c.SASURL.IsEmpty() {
+		c.SASURL = kms.NewEmptySecret()
+	}
+	if other.SASURL.IsEmpty() {
+		other.SASURL = kms.NewEmptySecret()
+	}
+	if !c.SASURL.IsEqual(other.SASURL) {
+		return false
+	}
+	if c.KeyPrefix != other.KeyPrefix {
+		return false
+	}
+	if c.UploadPartSize != other.UploadPartSize {
+		return false
+	}
+	if c.UploadConcurrency != other.UploadConcurrency {
+		return false
+	}
+	if c.UseEmulator != other.UseEmulator {
+		return false
+	}
+	if c.AccessTier != other.AccessTier {
+		return false
+	}
+	if c.AccountKey == nil {
+		c.AccountKey = kms.NewEmptySecret()
+	}
+	if other.AccountKey == nil {
+		other.AccountKey = kms.NewEmptySecret()
+	}
+	return c.AccountKey.IsEqual(other.AccountKey)
+}
+
 // EncryptCredentials encrypts access secret if it is in plain text
 func (c *AzBlobFsConfig) EncryptCredentials(additionalData string) error {
 	if c.AccountKey.IsPlain() {
@@ -290,10 +417,26 @@ func (c *AzBlobFsConfig) EncryptCredentials(additionalData string) error {
 			return err
 		}
 	}
+	if c.SASURL.IsPlain() {
+		c.SASURL.SetAdditionalData(additionalData)
+		if err := c.SASURL.Encrypt(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (c *AzBlobFsConfig) checkCredentials() error {
+	if c.SASURL.IsPlain() {
+		_, err := url.Parse(c.SASURL.GetPayload())
+		return err
+	}
+	if c.SASURL.IsEncrypted() && !c.SASURL.IsValid() {
+		return errors.New("invalid encrypted sas_url")
+	}
+	if !c.SASURL.IsEmpty() {
+		return nil
+	}
 	if c.AccountName == "" || !c.AccountKey.IsValidInput() {
 		return errors.New("credentials cannot be empty or invalid")
 	}
@@ -308,11 +451,11 @@ func (c *AzBlobFsConfig) Validate() error {
 	if c.AccountKey == nil {
 		c.AccountKey = kms.NewEmptySecret()
 	}
-	if c.SASURL != "" {
-		_, err := url.Parse(c.SASURL)
-		return err
+	if c.SASURL == nil {
+		c.SASURL = kms.NewEmptySecret()
 	}
-	if c.Container == "" {
+	// container could be embedded within SAS URL we check this at runtime
+	if c.SASURL.IsEmpty() && c.Container == "" {
 		return errors.New("container cannot be empty")
 	}
 	if err := c.checkCredentials(); err != nil {
@@ -342,6 +485,16 @@ func (c *AzBlobFsConfig) Validate() error {
 // CryptFsConfig defines the configuration to store local files as encrypted
 type CryptFsConfig struct {
 	Passphrase *kms.Secret `json:"passphrase,omitempty"`
+}
+
+func (c *CryptFsConfig) isEqual(other *CryptFsConfig) bool {
+	if c.Passphrase == nil {
+		c.Passphrase = kms.NewEmptySecret()
+	}
+	if other.Passphrase == nil {
+		other.Passphrase = kms.NewEmptySecret()
+	}
+	return c.Passphrase.IsEqual(other.Passphrase)
 }
 
 // EncryptCredentials encrypts access secret if it is in plain text
@@ -433,9 +586,45 @@ func IsSFTPFs(fs Fs) bool {
 	return strings.HasPrefix(fs.Name(), sftpFsName)
 }
 
+// IsBufferedSFTPFs returns true if this is a buffered SFTP filesystem
+func IsBufferedSFTPFs(fs Fs) bool {
+	if !IsSFTPFs(fs) {
+		return false
+	}
+	return !fs.IsUploadResumeSupported()
+}
+
+// IsLocalOrUnbufferedSFTPFs returns true if fs is local or SFTP with no buffer
+func IsLocalOrUnbufferedSFTPFs(fs Fs) bool {
+	if IsLocalOsFs(fs) {
+		return true
+	}
+	if IsSFTPFs(fs) {
+		return fs.IsUploadResumeSupported()
+	}
+	return false
+}
+
 // IsLocalOrSFTPFs returns true if fs is local or SFTP
 func IsLocalOrSFTPFs(fs Fs) bool {
 	return IsLocalOsFs(fs) || IsSFTPFs(fs)
+}
+
+// HasOpenRWSupport returns true if the fs can open a file
+// for reading and writing at the same time
+func HasOpenRWSupport(fs Fs) bool {
+	if IsLocalOsFs(fs) {
+		return true
+	}
+	if IsSFTPFs(fs) && fs.IsUploadResumeSupported() {
+		return true
+	}
+	return false
+}
+
+// IsLocalOrCryptoFs returns true if fs is local or local encrypted
+func IsLocalOrCryptoFs(fs Fs) bool {
+	return IsLocalOsFs(fs) || IsCryptOsFs(fs)
 }
 
 // SetPathPermissions calls fs.Chown.

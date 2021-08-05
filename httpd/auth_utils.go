@@ -18,9 +18,11 @@ import (
 type tokenAudience = string
 
 const (
-	tokenAudienceWeb  tokenAudience = "Web"
-	tokenAudienceAPI  tokenAudience = "API"
-	tokenAudienceCSRF tokenAudience = "CSRF"
+	tokenAudienceWebAdmin  tokenAudience = "WebAdmin"
+	tokenAudienceWebClient tokenAudience = "WebClient"
+	tokenAudienceAPI       tokenAudience = "API"
+	tokenAudienceAPIUser   tokenAudience = "APIUser"
+	tokenAudienceCSRF      tokenAudience = "CSRF"
 )
 
 const (
@@ -30,8 +32,8 @@ const (
 )
 
 var (
-	tokenDuration   = 10 * time.Minute
-	tokenRefreshMin = 5 * time.Minute
+	tokenDuration   = 15 * time.Minute
+	tokenRefreshMin = 10 * time.Minute
 )
 
 type jwtTokenClaims struct {
@@ -119,33 +121,53 @@ func (c *jwtTokenClaims) createTokenResponse(tokenAuth *jwtauth.JWTAuth, audienc
 	return response, nil
 }
 
-func (c *jwtTokenClaims) createAndSetCookie(w http.ResponseWriter, r *http.Request, tokenAuth *jwtauth.JWTAuth) error {
-	resp, err := c.createTokenResponse(tokenAuth, tokenAudienceWeb)
+func (c *jwtTokenClaims) createAndSetCookie(w http.ResponseWriter, r *http.Request, tokenAuth *jwtauth.JWTAuth, audience tokenAudience) error {
+	resp, err := c.createTokenResponse(tokenAuth, audience)
 	if err != nil {
 		return err
+	}
+	var basePath string
+	if audience == tokenAudienceWebAdmin {
+		basePath = webBaseAdminPath
+	} else {
+		basePath = webBaseClientPath
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "jwt",
 		Value:    resp["access_token"].(string),
-		Path:     webBasePath,
+		Path:     basePath,
 		Expires:  time.Now().Add(tokenDuration),
+		MaxAge:   int(tokenDuration / time.Second),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isTLS(r),
+		SameSite: http.SameSiteStrictMode,
 	})
 
 	return nil
 }
 
-func (c *jwtTokenClaims) removeCookie(w http.ResponseWriter, r *http.Request) {
+func (c *jwtTokenClaims) removeCookie(w http.ResponseWriter, r *http.Request, cookiePath string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "jwt",
 		Value:    "",
-		Path:     webBasePath,
+		Path:     cookiePath,
+		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isTLS(r),
+		SameSite: http.SameSiteStrictMode,
 	})
 	invalidateToken(r)
+}
+
+func isTLS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if proto, ok := r.Context().Value(forwardedProtoKey).(string); ok {
+		return proto == "https"
+	}
+	return false
 }
 
 func isTokenInvalidated(r *http.Request) bool {
@@ -176,6 +198,19 @@ func invalidateToken(r *http.Request) {
 	if tokenString != "" {
 		invalidatedJWTTokens.Store(tokenString, time.Now().UTC().Add(tokenDuration))
 	}
+}
+
+func getUserFromToken(r *http.Request) *dataprovider.User {
+	user := &dataprovider.User{}
+	_, claims, err := jwtauth.FromContext(r.Context())
+	if err != nil {
+		return user
+	}
+	tokenClaims := jwtTokenClaims{}
+	tokenClaims.Decode(claims)
+	user.Username = tokenClaims.Username
+	user.Filters.WebClient = tokenClaims.Permissions
+	return user
 }
 
 func getAdminFromToken(r *http.Request) *dataprovider.Admin {
@@ -211,13 +246,13 @@ func createCSRFToken() string {
 func verifyCSRFToken(tokenString string) error {
 	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
 	if err != nil || token == nil {
-		logger.Debug(logSender, "", "error validating CSRF: %v", err)
-		return fmt.Errorf("Unable to verify form token: %v", err)
+		logger.Debug(logSender, "", "error validating CSRF token %#v: %v", tokenString, err)
+		return fmt.Errorf("unable to verify form token: %v", err)
 	}
 
 	if !utils.IsStringInSlice(tokenAudienceCSRF, token.Audience()) {
 		logger.Debug(logSender, "", "error validating CSRF token audience")
-		return errors.New("The form token is not valid")
+		return errors.New("the form token is not valid")
 	}
 
 	return nil

@@ -3,13 +3,13 @@ package vfs
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 
 	"github.com/eikenb/pipeat"
-	"github.com/minio/sha256-simd"
 	"github.com/minio/sio"
 	"golang.org/x/crypto/hkdf"
 
@@ -27,27 +27,31 @@ const (
 // CryptFs is a Fs implementation that allows to encrypts/decrypts local files
 type CryptFs struct {
 	*OsFs
-	masterKey []byte
+	localTempDir string
+	masterKey    []byte
 }
 
 // NewCryptFs returns a CryptFs object
-func NewCryptFs(connectionID, rootDir string, config CryptFsConfig) (Fs, error) {
+func NewCryptFs(connectionID, rootDir, mountPath string, config CryptFsConfig) (Fs, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if config.Passphrase.IsEncrypted() {
-		if err := config.Passphrase.Decrypt(); err != nil {
-			return nil, err
-		}
+	if err := config.Passphrase.TryDecrypt(); err != nil {
+		return nil, err
 	}
 	fs := &CryptFs{
 		OsFs: &OsFs{
-			name:           cryptFsName,
-			connectionID:   connectionID,
-			rootDir:        rootDir,
-			virtualFolders: nil,
+			name:         cryptFsName,
+			connectionID: connectionID,
+			rootDir:      rootDir,
+			mountPath:    mountPath,
 		},
 		masterKey: []byte(config.Passphrase.GetPayload()),
+	}
+	if tempPath == "" {
+		fs.localTempDir = rootDir
+	} else {
+		fs.localTempDir = tempPath
 	}
 	return fs, nil
 }
@@ -68,7 +72,7 @@ func (fs *CryptFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, 
 		f.Close()
 		return nil, nil, nil, err
 	}
-	r, w, err := pipeat.PipeInDir(fs.rootDir)
+	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		f.Close()
 		return nil, nil, nil, err
@@ -98,6 +102,7 @@ func (fs *CryptFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, 
 				finished := false
 				for !finished {
 					readed, err = readerAt.ReadAt(buf, offset)
+					offset += int64(readed)
 					if err != nil && err != io.EOF {
 						break
 					}
@@ -158,7 +163,7 @@ func (fs *CryptFs) Create(name string, flag int, metadata map[string]string) (Fi
 		f.Close()
 		return nil, nil, nil, err
 	}
-	r, w, err := pipeat.PipeInDir(fs.rootDir)
+	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
 		f.Close()
 		return nil, nil, nil, err
@@ -174,7 +179,10 @@ func (fs *CryptFs) Create(name string, flag int, metadata map[string]string) (Fi
 
 	go func() {
 		n, err := sio.Encrypt(f, r, fs.getSIOConfig(key))
-		f.Close()
+		errClose := f.Close()
+		if err == nil && errClose != nil {
+			err = errClose
+		}
 		r.CloseWithError(err) //nolint:errcheck
 		p.Done(err)
 		fsLog(fs, logger.LevelDebug, "upload completed, path: %#v, readed bytes: %v, err: %v", name, n, err)
@@ -209,11 +217,6 @@ func (fs *CryptFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 
 // IsUploadResumeSupported returns false sio does not support random access writes
 func (*CryptFs) IsUploadResumeSupported() bool {
-	return false
-}
-
-// IsAtomicUploadSupported returns true if atomic upload is supported
-func (*CryptFs) IsAtomicUploadSupported() bool {
 	return false
 }
 

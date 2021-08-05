@@ -12,40 +12,42 @@ Several storage backends are supported: local filesystem, encrypted local filesy
 
 ## Features
 
-- SFTPGo uses virtual accounts stored inside a "data provider".
-- SQLite, MySQL, PostgreSQL, bbolt (key/value store in pure Go) and in-memory data providers are supported.
-- Each local account is chrooted in its home directory, for cloud-based accounts you can restrict access to a certain base path.
+- Support for serving local filesystem, encrypted local filesystem, S3 Compatible Object Storage, Google Cloud Storage, Azure Blob Storage or other SFTP accounts over SFTP/SCP/FTP/WebDAV.
+- Virtual folders are supported: a virtual folder can use any of the supported storage backends. So you can have, for example, an S3 user that exposes a GCS bucket (or part of it) on a specified path and an encrypted local filesystem on another one. Virtual folders can be private or shared among multiple users, for shared virtual folders you can define different quota limits for each user.
+- Configurable custom commands and/or HTTP hooks on file upload, pre-upload, download, pre-download, delete, pre-delete, rename, on SSH commands and on user add, update and delete.
+- Virtual accounts stored within a "data provider".
+- SQLite, MySQL, PostgreSQL, CockroachDB, Bolt (key/value store in pure Go) and in-memory data providers are supported.
+- Chroot isolation for local accounts. Cloud-based accounts can be restricted to a certain base path.
+- Per user and per directory virtual permissions, for each exposed path you can allow or deny: directory listing, upload, overwrite, download, delete, rename, create directories, create symlinks, change owner/group/file mode.
+- [REST API](./docs/rest-api.md) for users and folders management, backup, restore and real time reports of the active connections with possibility of forcibly closing a connection.
+- [Web based administration interface](./docs/web-admin.md) to easily manage users, folders and connections.
+- [Web client interface](./docs/web-client.md) so that end users can change their credentials and browse their files.
 - Public key and password authentication. Multiple public keys per user are supported.
 - SSH user [certificate authentication](https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?rev=1.8).
 - Keyboard interactive authentication. You can easily setup a customizable multi-factor authentication.
 - Partial authentication. You can configure multi-step authentication requiring, for example, the user password after successful public key authentication.
-- Per user authentication methods. You can configure the allowed authentication methods for each user.
-- Custom authentication via external programs/HTTP API is supported.
-- [Data At Rest Encryption](./docs/dare.md) is supported.
-- Dynamic user modification before login via external programs/HTTP API is supported.
+- Per user authentication methods.
+- Custom authentication via external programs/HTTP API.
+- [Data At Rest Encryption](./docs/dare.md).
+- Dynamic user modification before login via external programs/HTTP API.
 - Quota support: accounts can have individual quota expressed as max total size and/or max number of files.
-- Bandwidth throttling is supported, with distinct settings for upload and download.
+- Bandwidth throttling, with distinct settings for upload and download.
+- Per-protocol [rate limiting](./docs/rate-limiting.md) is supported and can be optionally connected to the built-in defender to automatically block hosts that repeatedly exceed the configured limit.
 - Per user maximum concurrent sessions.
-- Per user and per directory permission management: list directory contents, upload, overwrite, download, delete, rename, create directories, create symlinks, change owner/group and mode, change access and modification times.
-- Per user files/folders ownership mapping: you can map all the users to the system account that runs SFTPGo (all platforms are supported) or you can run SFTPGo as root user and map each user or group of users to a different system account (\*NIX only).
-- Per user IP filters are supported: login can be restricted to specific ranges of IP addresses or to a specific IP address.
-- Per user and per directory shell like patterns filters are supported: files can be allowed or denied based on shell like patterns.
-- Virtual folders are supported: directories outside the user home directory can be exposed as virtual folders.
-- Configurable custom commands and/or HTTP notifications on file upload, download, pre-delete, delete, rename, on SSH commands and on user add, update and delete.
+- Per user and global IP filters: login can be restricted to specific ranges of IP addresses or to a specific IP address.
+- Per user and per directory shell like patterns filters: files can be allowed or denied based on shell like patterns.
 - Automatically terminating idle connections.
-- Automatic blocklist management is supported using the built-in [defender](./docs/defender.md).
+- Automatic blocklist management using the built-in [defender](./docs/defender.md).
 - Atomic uploads are configurable.
+- Per user files/folders ownership mapping: you can map all the users to the system account that runs SFTPGo (all platforms are supported) or you can run SFTPGo as root user and map each user or group of users to a different system account (\*NIX only).
 - Support for Git repositories over SSH.
 - SCP and rsync are supported.
 - FTP/S is supported. You can configure the FTP service to require TLS for both control and data connections.
 - [WebDAV](./docs/webdav.md) is supported.
 - Two-Way TLS authentication, aka TLS with client certificate authentication, is supported for REST API/Web Admin, FTPS and WebDAV over HTTPS.
-- Support for serving local filesystem, encrypted local filesystem, S3 Compatible Object Storage, Google Cloud Storage, Azure Blob Storage or other SFTP accounts over SFTP/SCP/FTP/WebDAV.
 - Per user protocols restrictions. You can configure the allowed protocols (SSH/FTP/WebDAV) for each user.
 - [Prometheus metrics](./docs/metrics.md) are exposed.
 - Support for HAProxy PROXY protocol: you can proxy and/or load balance the SFTP/SCP/FTP/WebDAV service without losing the information about the client's address.
-- [REST API](./docs/rest-api.md) for users and folders management, backup, restore and real time reports of the active connections with possibility of forcibly closing a connection.
-- [Web based administration interface](./docs/web-admin.md) to easily manage users, folders and connections.
 - Easy [migration](./examples/convertusers) from Linux system user accounts.
 - [Portable mode](./docs/portable-mode.md): a convenient way to share a single directory on demand.
 - [SFTP subsystem mode](./docs/sftp-subsystem.md): you can use SFTPGo as OpenSSH's SFTP subsystem.
@@ -59,8 +61,8 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 
 ## Requirements
 
-- Go 1.15 or higher as build only dependency.
-- A suitable SQL server to use as data provider: PostgreSQL 9.4+ or MySQL 5.6+ or SQLite 3.x.
+- Go as build only dependency. We support the Go version(s) used in [continuous integration workflows](./tree/main/.github/workflows).
+- A suitable SQL server to use as data provider: PostgreSQL 9.4+ or MySQL 5.6+ or SQLite 3.x or CockroachDB stable.
 - The SQL server is optional: you can choose to use an embedded bolt database as key/value store or an in memory data provider.
 
 ## Installation
@@ -78,9 +80,20 @@ Some Linux distro packages are available:
 - Deb and RPM packages are built after each commit and for each release.
 - For Ubuntu a PPA is available [here](https://launchpad.net/~sftpgo/+archive/ubuntu/sftpgo).
 
+SFTPGo is also available on [AWS Marketplace](https://aws.amazon.com/marketplace/seller-profile?id=6e849ab8-70a6-47de-9a43-13c3fa849335), purchasing from there will help keep SFTPGo a long-term sustainable project.
+
+On FreeBSD you can install from the [SFTPGo port](https://www.freshports.org/ftp/sftpgo).
+
+On Windows you can use:
+
+- The Windows installer to install and run SFTPGo as a Windows service.
+- The portable package to start SFTPGo on demand.
+
 You can easily test new features selecting a commit from the [Actions](https://github.com/drakkan/sftpgo/actions) page and downloading the matching build artifacts for Linux, macOS or Windows. GitHub stores artifacts for 90 days.
 
 Alternately, you can [build from source](./docs/build-from-source.md).
+
+[Getting Started Guide for the Impatient](./docs/howto/getting-started.md).
 
 ## Configuration
 
@@ -100,7 +113,7 @@ Check out [this documentation](./docs/service.md) if you want to run SFTPGo as a
 
 Before starting the SFTPGo server please ensure that the configured data provider is properly initialized/updated.
 
-For PostgreSQL and MySQL providers, you need to create the configured database. For SQLite, the configured database will be automatically created at startup. Memory and bolt data providers do not require an initialization but they could require an update to the existing data after upgrading SFTPGo.
+For PostgreSQL, MySQL and CockroachDB providers, you need to create the configured database. For SQLite, the configured database will be automatically created at startup. Memory and bolt data providers do not require an initialization but they could require an update to the existing data after upgrading SFTPGo.
 
 SFTPGo will attempt to automatically detect if the data provider is initialized/updated and if not, will attempt to initialize/ update it on startup as needed.
 
@@ -120,26 +133,49 @@ sftpgo initprovider --help
 
 You can disable automatic data provider checks/updates at startup by setting the `update_mode` configuration key to `1`.
 
+## Create the first admin
+
+To start using SFTPGo you need to create an admin user, you can do it in several ways:
+
+- by using the web admin interface. The default URL is [http://127.0.0.1:8080/web/admin](http://127.0.0.1:8080/web/admin)
+- by loading initial data
+- by enabling `create_default_admin` in your configuration file. In this case the credentials are `admin`/`password`
+
+## Upgrading
+
+SFTPGo supports upgrading from the previous release branch to the current one.
+Some examples for supported upgrade paths are:
+
+- from 1.2.x to 2.0.x
+- from 2.0.x to 2.1.x and so on.
+
+For supported upgrade paths, the data and schema are migrated automatically, alternately you can use the `initprovider` command.
+
+So if, for example, you want to upgrade from a version before 1.2.x to 2.0.x, you must first install version 1.2.x, update the data provider and finally install the version 2.0.x. It is recommended to always install the latest available minor version, ie do not install 1.2.0 if 1.2.2 is available.
+
+Loading data from a provider independent JSON dump is supported from the previous release branch to the current one too. After upgrading SFTPGo it is advisable to regenerate the JSON dump from the new version.
+
+## Downgrading
+
 If for some reason you want to downgrade SFTPGo, you may need to downgrade your data provider schema and data as well. You can use the `revertprovider` command for this task.
 
-We support the follwing schema versions:
+As for upgrading, SFTPGo supports downgrading from the previous release branch to the current one.
 
-- `8`, this is the latest version
-- `4`, this is the schema for v1.0.0-v1.2.x
-
-So, if you plan to downgrade from 2.0.x to 1.2.x, you can prepare your data provider executing the following command from the configuration directory:
+So, if you plan to downgrade from 2.0.x to 1.2.x, before uninstalling 2.0.x version, you can prepare your data provider executing the following command from the configuration directory:
 
 ```shell
 sftpgo revertprovider --to-version 4
 ```
 
-Take a look at the CLI usage to learn how to specify a different configuration file:
+Take a look at the CLI usage to see the supported parameter for the `--to-version` argument and to learn how to specify a different configuration file:
 
-```bash
+```shell
 sftpgo revertprovider --help
 ```
 
 The `revertprovider` command is not supported for the memory provider.
+
+Please note that we only support the current release branch and the current main branch, if you find a bug it is better to report it rather than downgrading to an older unsupported version.
 
 ## Users and folders management
 
@@ -149,6 +185,8 @@ After starting SFTPGo you can manage users and folders using:
 - the [REST API](./docs/rest-api.md)
 
 To support embedded data providers like `bolt` and `SQLite` we can't have a CLI that directly write users and folders to the data provider, we always have to use the REST API.
+
+Full details for users, folders, admins and other resources are documented in the [OpenAPI](/httpd/schema/openapi.yaml) schema. If you want to render the schema without importing it manually, you can explore it on [Stoplight](https://sftpgo.stoplight.io/docs/sftpgo/openapi.yaml).
 
 ## Tutorials
 
@@ -179,7 +217,7 @@ More information about custom actions can be found [here](./docs/custom-actions.
 
 ## Virtual folders
 
-Directories outside the user home directory can be exposed as virtual folders, more information [here](./docs/virtual-folders.md).
+Directories outside the user home directory or based on a different storage provider can be exposed as virtual folders, more information [here](./docs/virtual-folders.md).
 
 ## Other hooks
 
@@ -252,8 +290,6 @@ Thank you [ysura](https://www.ysura.com/) for granting me stable access to a tes
 I'd like to make SFTPGo into a sustainable long term project and your [sponsorship](https://github.com/sponsors/drakkan) will really help :heart:
 
 Thank you to our sponsors!
-
-[<img src="https://images.squarespace-cdn.com/content/5e5db7f1ded5fc06a4e9628b/1583608099266-T5NW2WNQL7PC15LPRB16/logo+black.png?format=1500w&content-type=image%2Fpng" width="33%" alt="segmed logo">](https://www.segmed.ai/)
 
 ## License
 

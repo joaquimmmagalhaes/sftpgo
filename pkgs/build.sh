@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NFPM_VERSION=2.3.1
+NFPM_VERSION=2.5.1
 NFPM_ARCH=${NFPM_ARCH:-amd64}
 if [ -z ${SFTPGO_VERSION} ]
 then
@@ -80,7 +80,7 @@ contents:
   - src: "${BASE_DIR}/templates/*"
     dst: "/usr/share/sftpgo/templates/"
 
-  - src: "${BASE_DIR}/static/**/*"
+  - src: "${BASE_DIR}/static/*"
     dst: "/usr/share/sftpgo/static/"
 
   - src: "./sftpgo.json"

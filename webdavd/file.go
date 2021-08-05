@@ -84,7 +84,7 @@ func (f *webDavFile) Readdir(count int) ([]os.FileInfo, error) {
 	if !f.Connection.User.HasPerm(dataprovider.PermListItems, f.GetVirtualPath()) {
 		return nil, f.Connection.GetPermissionDeniedError()
 	}
-	fileInfos, err := f.Connection.ListDir(f.GetFsPath(), f.GetVirtualPath())
+	fileInfos, err := f.Connection.ListDir(f.GetVirtualPath())
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +145,12 @@ func (f *webDavFile) Read(p []byte) (n int, err error) {
 
 		if !f.Connection.User.IsFileAllowed(f.GetVirtualPath()) {
 			f.Connection.Log(logger.LevelWarn, "reading file %#v is not allowed", f.GetVirtualPath())
+			return 0, f.Connection.GetPermissionDeniedError()
+		}
+		err := common.ExecutePreAction(&f.Connection.User, common.OperationPreDownload, f.GetFsPath(), f.GetVirtualPath(),
+			f.Connection.GetProtocol(), 0, 0)
+		if err != nil {
+			f.Connection.Log(logger.LevelDebug, "download for file %#v denied by pre action: %v", f.GetVirtualPath(), err)
 			return 0, f.Connection.GetPermissionDeniedError()
 		}
 		atomic.StoreInt32(&f.readTryed, 1)
@@ -299,7 +305,7 @@ func (f *webDavFile) Close() error {
 	} else {
 		f.Connection.RemoveTransfer(f.BaseTransfer)
 	}
-	return f.Connection.GetFsError(err)
+	return f.Connection.GetFsError(f.Fs, err)
 }
 
 func (f *webDavFile) closeIO() error {
@@ -323,6 +329,7 @@ func (f *webDavFile) closeIO() error {
 func (f *webDavFile) setFinished() error {
 	f.Lock()
 	defer f.Unlock()
+
 	if f.isFinished {
 		return common.ErrTransferClosed
 	}

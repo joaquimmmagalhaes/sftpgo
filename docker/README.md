@@ -4,10 +4,10 @@ SFTPGo provides an official Docker image, it is available on both [Docker Hub](h
 
 ## Supported tags and respective Dockerfile links
 
-- [v2.0.4, v2.0, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile)
-- [v2.0.4-alpine, v2.0-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile.alpine)
-- [v2.0.4-slim, v2.0-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile)
-- [v2.0.4-alpine-slim, v2.0-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.0.4/Dockerfile.alpine)
+- [v2.1.0, v2.1, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.1.0/Dockerfile)
+- [v2.1.0-alpine, v2.1-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.1.0/Dockerfile.alpine)
+- [v2.1.0-slim, v2.1-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.1.0/Dockerfile)
+- [v2.1.0-alpine-slim, v2.1-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.1.0/Dockerfile.alpine)
 - [edge](../Dockerfile)
 - [edge-alpine](../Dockerfile.alpine)
 - [edge-slim](../Dockerfile)
@@ -25,9 +25,53 @@ docker run --name some-sftpgo -p 127.0.0.1:8080:8080 -p 2022:2022 -d "drakkan/sf
 
 ... where `some-sftpgo` is the name you want to assign to your container, and `tag` is the tag specifying the SFTPGo version you want. See the list above for relevant tags.
 
-Now visit [http://localhost:8080/](http://localhost:8080/) and create a new SFTPGo user. The SFTP service is available on port 2022.
+Now visit [http://localhost:8080/web/admin](http://localhost:8080/web/admin), create the first admin and then log in and create a new SFTPGo user. The SFTP service is available on port 2022.
+
+If you don't want to persist any files, for example for testing purposes, you can run an SFTPGo instance like this:
+
+```shell
+docker run --rm --name some-sftpgo -p 8080:8080 -p 2022:2022 -d "drakkan/sftpgo:tag"
+```
 
 If you prefer GitHub Container Registry to Docker Hub replace `drakkan/sftpgo:tag` with `ghcr.io/drakkan/sftpgo:tag`.
+
+### Enable FTP service
+
+FTP is disabled by default, you can enable the FTP service by starting the SFTPGo instance in this way:
+
+```shell
+docker run --name some-sftpgo \
+    -p 8080:8080 \
+    -p 2022:2022 \
+    -p 2121:2121 \
+    -p 50000-50100:50000-50100 \
+    -e SFTPGO_FTPD__BINDINGS__0__PORT=2121 \
+    -e SFTPGO_FTPD__BINDINGS__0__FORCE_PASSIVE_IP=<your external ip here> \
+    -d "drakkan/sftpgo:tag"
+```
+
+The FTP service is now available on port 2121 and SFTP on port 2022.
+
+You can change the passive ports range (`50000-50100` by default) by setting the environment variables `SFTPGO_FTPD__PASSIVE_PORT_RANGE__START` and `SFTPGO_FTPD__PASSIVE_PORT_RANGE__END`.
+
+It is recommended that you provide a certificate and key file to expose FTP over TLS. You should prefer SFTP to FTP even if you configure TLS, please don't blindly enable the old FTP protocol.
+
+### Enable WebDAV service
+
+WebDAV is disabled by default, you can enable the WebDAV service by starting the SFTPGo instance in this way:
+
+```shell
+docker run --name some-sftpgo \
+    -p 8080:8080 \
+    -p 2022:2022 \
+    -p 10080:10080 \
+    -e SFTPGO_WEBDAVD__BINDINGS__0__PORT=10080 \
+    -d "drakkan/sftpgo:tag"
+```
+
+The WebDAV service is now available on port 10080 and SFTP on port 2022.
+
+It is recommended that you provide a certificate and key file to expose WebDAV over https.
 
 ### Container shell access and viewing SFTPGo logs
 

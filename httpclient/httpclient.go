@@ -4,9 +4,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/go-retryablehttp"
@@ -21,12 +23,21 @@ type TLSKeyPair struct {
 	Key  string `json:"key" mapstructure:"key"`
 }
 
+// Header defines an HTTP header.
+// If the URL is not empty, the header is added only if the
+// requested URL starts with the one specified
+type Header struct {
+	Key   string `json:"key" mapstructure:"key"`
+	Value string `json:"value" mapstructure:"value"`
+	URL   string `json:"url" mapstructure:"url"`
+}
+
 // Config defines the configuration for HTTP clients.
 // HTTP clients are used for executing hooks such as the ones used for
 // custom actions, external authentication and pre-login user modifications
 type Config struct {
 	// Timeout specifies a time limit, in seconds, for a request
-	Timeout int64 `json:"timeout" mapstructure:"timeout"`
+	Timeout float64 `json:"timeout" mapstructure:"timeout"`
 	// RetryWaitMin defines the minimum waiting time between attempts in seconds
 	RetryWaitMin int `json:"retry_wait_min" mapstructure:"retry_wait_min"`
 	// RetryWaitMax defines the minimum waiting time between attempts in seconds
@@ -44,7 +55,9 @@ type Config struct {
 	// the server and any host name in that certificate.
 	// In this mode, TLS is susceptible to man-in-the-middle attacks.
 	// This should be used only for testing.
-	SkipTLSVerify   bool `json:"skip_tls_verify" mapstructure:"skip_tls_verify"`
+	SkipTLSVerify bool `json:"skip_tls_verify" mapstructure:"skip_tls_verify"`
+	// Headers defines a list of http headers to add to each request
+	Headers         []Header `json:"headers" mapstructure:"headers"`
 	customTransport *http.Transport
 	tlsConfig       *tls.Config
 }
@@ -76,6 +89,13 @@ func (c *Config) Initialize(configDir string) error {
 	if err != nil {
 		return err
 	}
+	var headers []Header
+	for _, h := range c.Headers {
+		if h.Key != "" && h.Value != "" {
+			headers = append(headers, h)
+		}
+	}
+	c.Headers = headers
 	httpConfig = *c
 	return nil
 }
@@ -98,7 +118,7 @@ func (c *Config) loadCACerts(configDir string) (*x509.CertPool, error) {
 		if !filepath.IsAbs(ca) {
 			ca = filepath.Join(configDir, ca)
 		}
-		certs, err := ioutil.ReadFile(ca)
+		certs, err := os.ReadFile(ca)
 		if err != nil {
 			return nil, fmt.Errorf("unable to load CA certificate: %v", err)
 		}
@@ -144,7 +164,7 @@ func (c *Config) loadCertificates(configDir string) error {
 // GetHTTPClient returns an HTTP client with the configured parameters
 func GetHTTPClient() *http.Client {
 	return &http.Client{
-		Timeout:   time.Duration(httpConfig.Timeout) * time.Second,
+		Timeout:   time.Duration(httpConfig.Timeout * float64(time.Second)),
 		Transport: httpConfig.customTransport,
 	}
 }
@@ -153,7 +173,7 @@ func GetHTTPClient() *http.Client {
 // It uses the configured retry parameters
 func GetRetraybleHTTPClient() *retryablehttp.Client {
 	client := retryablehttp.NewClient()
-	client.HTTPClient.Timeout = time.Duration(httpConfig.Timeout) * time.Second
+	client.HTTPClient.Timeout = time.Duration(httpConfig.Timeout * float64(time.Second))
 	client.HTTPClient.Transport.(*http.Transport).TLSClientConfig = httpConfig.tlsConfig
 	client.Logger = &logger.LeveledLogger{Sender: "RetryableHTTPClient"}
 	client.RetryWaitMin = time.Duration(httpConfig.RetryWaitMin) * time.Second
@@ -161,4 +181,64 @@ func GetRetraybleHTTPClient() *retryablehttp.Client {
 	client.RetryMax = httpConfig.RetryMax
 
 	return client
+}
+
+// Get issues a GET to the specified URL
+func Get(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	addHeaders(req, url)
+	return GetHTTPClient().Do(req)
+}
+
+// Post issues a POST to the specified URL
+func Post(url string, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	addHeaders(req, url)
+	return GetHTTPClient().Do(req)
+}
+
+// RetryableGet issues a GET to the specified URL using the retryable client
+func RetryableGet(url string) (*http.Response, error) {
+	req, err := retryablehttp.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	addHeadersToRetryableReq(req, url)
+	return GetRetraybleHTTPClient().Do(req)
+}
+
+// RetryablePost issues a POST to the specified URL using the retryable client
+func RetryablePost(url string, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := retryablehttp.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	addHeadersToRetryableReq(req, url)
+	return GetRetraybleHTTPClient().Do(req)
+}
+
+func addHeaders(req *http.Request, url string) {
+	for idx := range httpConfig.Headers {
+		h := &httpConfig.Headers[idx]
+		if h.URL == "" || strings.HasPrefix(url, h.URL) {
+			req.Header.Set(h.Key, h.Value)
+		}
+	}
+}
+
+func addHeadersToRetryableReq(req *retryablehttp.Request, url string) {
+	for idx := range httpConfig.Headers {
+		h := &httpConfig.Headers[idx]
+		if h.URL == "" || strings.HasPrefix(url, h.URL) {
+			req.Header.Set(h.Key, h.Value)
+		}
+	}
 }

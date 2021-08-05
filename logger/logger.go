@@ -120,6 +120,13 @@ func InitLogger(logFilePath string, logMaxSize int, logMaxBackups int, logMaxAge
 	zerolog.TimeFieldFormat = dateFormat
 	zerolog.LevelFieldName = levelFieldName
 	if isLogFilePathValid(logFilePath) {
+		logDir := filepath.Dir(logFilePath)
+		if _, err := os.Stat(logDir); os.IsNotExist(err) {
+			err = os.MkdirAll(logDir, os.ModePerm)
+			if err != nil {
+				fmt.Printf("unable to create log dir %#v: %v", logDir, err)
+			}
+		}
 		rollingLogger = &lumberjack.Logger{
 			Filename:   logFilePath,
 			MaxSize:    logMaxSize,
@@ -233,10 +240,11 @@ func ErrorToConsole(format string, v ...interface{}) {
 }
 
 // TransferLog logs uploads or downloads
-func TransferLog(operation string, path string, elapsed int64, size int64, user string, connectionID string, protocol string) {
+func TransferLog(operation, path string, elapsed int64, size int64, user, connectionID, protocol, remoteAddr string) {
 	logger.Info().
 		Timestamp().
 		Str("sender", operation).
+		Str("remote_addr", remoteAddr).
 		Int64("elapsed_ms", elapsed).
 		Int64("size_bytes", size).
 		Str("username", user).
@@ -248,10 +256,11 @@ func TransferLog(operation string, path string, elapsed int64, size int64, user 
 
 // CommandLog logs an SFTP/SCP/SSH command
 func CommandLog(command, path, target, user, fileMode, connectionID, protocol string, uid, gid int, atime, mtime,
-	sshCommand string, size int64) {
+	sshCommand string, size int64, remoteAddr string) {
 	logger.Info().
 		Timestamp().
 		Str("sender", command).
+		Str("remote_addr", remoteAddr).
 		Str("username", user).
 		Str("file_path", path).
 		Str("target_path", target).

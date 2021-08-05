@@ -1,9 +1,9 @@
 package common
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"sort"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/yl2chen/cidranger"
 
+	"github.com/drakkan/sftpgo/dataprovider"
 	"github.com/drakkan/sftpgo/logger"
 	"github.com/drakkan/sftpgo/utils"
 )
@@ -24,15 +25,53 @@ const (
 	HostEventLoginFailed HostEvent = iota
 	HostEventUserNotFound
 	HostEventNoLoginTried
+	HostEventLimitExceeded
 )
+
+// DefenderEntry defines a defender entry
+type DefenderEntry struct {
+	IP      string    `json:"ip"`
+	Score   int       `json:"score,omitempty"`
+	BanTime time.Time `json:"ban_time,omitempty"`
+}
+
+// GetID returns an unique ID for a defender entry
+func (d *DefenderEntry) GetID() string {
+	return hex.EncodeToString([]byte(d.IP))
+}
+
+// GetBanTime returns the ban time for a defender entry as string
+func (d *DefenderEntry) GetBanTime() string {
+	if d.BanTime.IsZero() {
+		return ""
+	}
+	return d.BanTime.UTC().Format(time.RFC3339)
+}
+
+// MarshalJSON returns the JSON encoding of a DefenderEntry.
+func (d *DefenderEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&struct {
+		ID      string `json:"id"`
+		IP      string `json:"ip"`
+		Score   int    `json:"score,omitempty"`
+		BanTime string `json:"ban_time,omitempty"`
+	}{
+		ID:      d.GetID(),
+		IP:      d.IP,
+		Score:   d.Score,
+		BanTime: d.GetBanTime(),
+	})
+}
 
 // Defender defines the interface that a defender must implements
 type Defender interface {
+	GetHosts() []*DefenderEntry
+	GetHost(ip string) (*DefenderEntry, error)
 	AddEvent(ip string, event HostEvent)
 	IsBanned(ip string) bool
 	GetBanTime(ip string) *time.Time
 	GetScore(ip string) int
-	Unban(ip string) bool
+	DeleteHost(ip string) bool
 	Reload() error
 }
 
@@ -51,6 +90,9 @@ type DefenderConfig struct {
 	ScoreInvalid int `json:"score_invalid" mapstructure:"score_invalid"`
 	// Score for valid login attempts, eg. user accounts that exist
 	ScoreValid int `json:"score_valid" mapstructure:"score_valid"`
+	// Score for limit exceeded events, generated from the rate limiters or for max connections
+	// per-host exceeded
+	ScoreLimitExceeded int `json:"score_limit_exceeded" mapstructure:"score_limit_exceeded"`
 	// Defines the time window, in minutes, for tracking client errors.
 	// A host is banned if it has exceeded the defined threshold during
 	// the last observation time minutes
@@ -124,6 +166,9 @@ func (c *DefenderConfig) validate() error {
 	if c.ScoreValid >= c.Threshold {
 		return fmt.Errorf("score_valid %v cannot be greater than threshold %v", c.ScoreValid, c.Threshold)
 	}
+	if c.ScoreLimitExceeded >= c.Threshold {
+		return fmt.Errorf("score_limit_exceeded %v cannot be greater than threshold %v", c.ScoreLimitExceeded, c.Threshold)
+	}
 	if c.BanTime <= 0 {
 		return fmt.Errorf("invalid ban_time %v", c.BanTime)
 	}
@@ -184,6 +229,70 @@ func (d *memoryDefender) Reload() error {
 	return nil
 }
 
+// GetHosts returns hosts that are banned or for which some violations have been detected
+func (d *memoryDefender) GetHosts() []*DefenderEntry {
+	d.RLock()
+	defer d.RUnlock()
+
+	var result []*DefenderEntry
+	for k, v := range d.banned {
+		if v.After(time.Now()) {
+			result = append(result, &DefenderEntry{
+				IP:      k,
+				BanTime: v,
+			})
+		}
+	}
+	for k, v := range d.hosts {
+		score := 0
+		for _, event := range v.Events {
+			if event.dateTime.Add(time.Duration(d.config.ObservationTime) * time.Minute).After(time.Now()) {
+				score += event.score
+			}
+		}
+		if score > 0 {
+			result = append(result, &DefenderEntry{
+				IP:    k,
+				Score: score,
+			})
+		}
+	}
+
+	return result
+}
+
+// GetHost returns a defender host by ip, if any
+func (d *memoryDefender) GetHost(ip string) (*DefenderEntry, error) {
+	d.RLock()
+	defer d.RUnlock()
+
+	if banTime, ok := d.banned[ip]; ok {
+		if banTime.After(time.Now()) {
+			return &DefenderEntry{
+				IP:      ip,
+				BanTime: banTime,
+			}, nil
+		}
+	}
+
+	if hs, ok := d.hosts[ip]; ok {
+		score := 0
+		for _, event := range hs.Events {
+			if event.dateTime.Add(time.Duration(d.config.ObservationTime) * time.Minute).After(time.Now()) {
+				score += event.score
+			}
+		}
+		if score > 0 {
+			return &DefenderEntry{
+				IP:    ip,
+				Score: score,
+			}, nil
+		}
+	}
+
+	return nil, dataprovider.NewRecordNotFoundError("host not found")
+}
+
 // IsBanned returns true if the specified IP is banned
 // and increase ban time if the IP is found.
 // This method must be called as soon as the client connects
@@ -221,13 +330,18 @@ func (d *memoryDefender) IsBanned(ip string) bool {
 	return false
 }
 
-// Unban removes the specified IP address from the banned ones
-func (d *memoryDefender) Unban(ip string) bool {
+// DeleteHost removes the specified IP from the defender lists
+func (d *memoryDefender) DeleteHost(ip string) bool {
 	d.Lock()
 	defer d.Unlock()
 
 	if _, ok := d.banned[ip]; ok {
 		delete(d.banned, ip)
+		return true
+	}
+
+	if _, ok := d.hosts[ip]; ok {
+		delete(d.hosts, ip)
 		return true
 	}
 
@@ -244,11 +358,21 @@ func (d *memoryDefender) AddEvent(ip string, event HostEvent) {
 		return
 	}
 
+	// ignore events for already banned hosts
+	if v, ok := d.banned[ip]; ok {
+		if v.After(time.Now()) {
+			return
+		}
+		delete(d.banned, ip)
+	}
+
 	var score int
 
 	switch event {
 	case HostEventLoginFailed:
 		score = d.config.ScoreValid
+	case HostEventLimitExceeded:
+		score = d.config.ScoreLimitExceeded
 	case HostEventUserNotFound, HostEventNoLoginTried:
 		score = d.config.ScoreInvalid
 	}
@@ -413,7 +537,7 @@ func loadHostListFromFile(name string) (*HostList, error) {
 		return nil, fmt.Errorf("host list file %#v is too big: %v bytes", name, info.Size())
 	}
 
-	content, err := ioutil.ReadFile(name)
+	content, err := os.ReadFile(name)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read input file %#v: %v", name, err)
 	}

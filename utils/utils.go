@@ -2,6 +2,7 @@
 package utils
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -17,9 +18,9 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,12 +36,20 @@ import (
 
 const (
 	logSender = "utils"
+	osWindows = "windows"
+)
+
+var (
+	xForwardedFor  = http.CanonicalHeaderKey("X-Forwarded-For")
+	xRealIP        = http.CanonicalHeaderKey("X-Real-IP")
+	cfConnectingIP = http.CanonicalHeaderKey("CF-Connecting-IP")
+	trueClientIP   = http.CanonicalHeaderKey("True-Client-IP")
 )
 
 // IsStringInSlice searches a string in a slice and returns true if the string is found
 func IsStringInSlice(obj string, list []string) bool {
-	for _, v := range list {
-		if v == obj {
+	for i := 0; i < len(list); i++ {
+		if list[i] == obj {
 			return true
 		}
 	}
@@ -50,8 +59,8 @@ func IsStringInSlice(obj string, list []string) bool {
 // IsStringPrefixInSlice searches a string prefix in a slice and returns true
 // if a matching prefix is found
 func IsStringPrefixInSlice(obj string, list []string) bool {
-	for _, v := range list {
-		if strings.HasPrefix(obj, v) {
+	for i := 0; i < len(list); i++ {
+		if strings.HasPrefix(obj, list[i]) {
 			return true
 		}
 	}
@@ -240,7 +249,7 @@ func GenerateRSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateECDSAKeys generate ecdsa private and public keys and write the
@@ -278,7 +287,7 @@ func GenerateECDSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateEd25519Keys generate ed25519 private and public keys and write the
@@ -310,21 +319,27 @@ func GenerateEd25519Keys(file string) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
-// GetDirsForSFTPPath returns all the directory for the given path in reverse order
+// GetDirsForVirtualPath returns all the directory for the given path in reverse order
 // for example if the path is: /1/2/3/4 it returns:
 // [ "/1/2/3/4", "/1/2/3", "/1/2", "/1", "/" ]
-func GetDirsForSFTPPath(p string) []string {
-	sftpPath := CleanPath(p)
-	dirsForPath := []string{sftpPath}
+func GetDirsForVirtualPath(virtualPath string) []string {
+	if virtualPath == "." {
+		virtualPath = "/"
+	} else {
+		if !path.IsAbs(virtualPath) {
+			virtualPath = CleanPath(virtualPath)
+		}
+	}
+	dirsForPath := []string{virtualPath}
 	for {
-		if sftpPath == "/" {
+		if virtualPath == "/" {
 			break
 		}
-		sftpPath = path.Dir(sftpPath)
-		dirsForPath = append(dirsForPath, sftpPath)
+		virtualPath = path.Dir(virtualPath)
+		dirsForPath = append(dirsForPath, virtualPath)
 	}
 	return dirsForPath
 }
@@ -368,7 +383,7 @@ func IsFileInputValid(fileInput string) bool {
 // the -l flag will be ignored and the -c flag will get the value `C:\ProgramData\SFTPGO" -l sftpgo.log`
 // since the backslash after SFTPGO escape the double quote. This is definitely a bad user input
 func CleanDirInput(dirInput string) string {
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		for strings.HasSuffix(dirInput, "\"") {
 			dirInput = strings.TrimSuffix(dirInput, "\"")
 		}
@@ -391,7 +406,7 @@ func createDirPathIfMissing(file string, perm os.FileMode) error {
 func GenerateRandomBytes(length int) []byte {
 	b := make([]byte, length)
 	_, err := io.ReadFull(rand.Reader, b)
-	if err != nil {
+	if err == nil {
 		return b
 	}
 
@@ -409,7 +424,7 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 	var listener net.Listener
 	var err error
 
-	if filepath.IsAbs(address) && runtime.GOOS != "windows" {
+	if filepath.IsAbs(address) && runtime.GOOS != osWindows {
 		if !IsFileInputValid(address) {
 			return fmt.Errorf("invalid socket address %#v", address)
 		}
@@ -419,10 +434,10 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 			logger.Error(logSender, "", "error creating Unix-domain socket parent dir: %v", err)
 		}
 		os.Remove(address)
-
-		listener, err = net.Listen("unix", address)
+		listener, err = newListener("unix", address, srv.ReadTimeout, srv.WriteTimeout)
 	} else {
-		listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", address, port))
+		CheckTCP4Port(port)
+		listener, err = newListener("tcp", fmt.Sprintf("%s:%d", address, port), srv.ReadTimeout, srv.WriteTimeout)
 	}
 	if err != nil {
 		return err
@@ -451,4 +466,119 @@ func GetTLSCiphersFromNames(cipherNames []string) []uint16 {
 	}
 
 	return ciphers
+}
+
+// EncodeTLSCertToPem returns the specified certificate PEM encoded.
+// This can be verified using openssl x509 -in cert.crt  -text -noout
+func EncodeTLSCertToPem(tlsCert *x509.Certificate) (string, error) {
+	if len(tlsCert.Raw) == 0 {
+		return "", errors.New("invalid x509 certificate, no der contents")
+	}
+	publicKeyBlock := pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: tlsCert.Raw,
+	}
+	return string(pem.EncodeToMemory(&publicKeyBlock)), nil
+}
+
+// CheckTCP4Port quits the app if bind on the given IPv4 port fails.
+// This is a ugly hack to avoid to bind on an already used port.
+// It is required on Windows only. Upstream does not consider this
+// behaviour a bug:
+// https://github.com/golang/go/issues/45150
+func CheckTCP4Port(port int) {
+	if runtime.GOOS != osWindows {
+		return
+	}
+	listener, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
+	if err != nil {
+		logger.ErrorToConsole("unable to bind on tcp4 address: %v", err)
+		logger.Error(logSender, "", "unable to bind on tcp4 address: %v", err)
+		os.Exit(1)
+	}
+	listener.Close()
+}
+
+// IsByteArrayEmpty return true if the byte array is empty or a new line
+func IsByteArrayEmpty(b []byte) bool {
+	if len(b) == 0 {
+		return true
+	}
+	if bytes.Equal(b, []byte("\n")) {
+		return true
+	}
+	if bytes.Equal(b, []byte("\r\n")) {
+		return true
+	}
+	return false
+}
+
+// GetSSHPublicKeyAsString returns an SSH public key serialized as string
+func GetSSHPublicKeyAsString(pubKey []byte) (string, error) {
+	if len(pubKey) == 0 {
+		return "", nil
+	}
+	k, err := ssh.ParsePublicKey(pubKey)
+	if err != nil {
+		return "", err
+	}
+	return string(ssh.MarshalAuthorizedKey(k)), nil
+}
+
+// GetRealIP returns the ip address as result of parsing either the
+// X-Real-IP header or the X-Forwarded-For header
+func GetRealIP(r *http.Request) string {
+	var ip string
+
+	if xrip := r.Header.Get(xRealIP); xrip != "" {
+		ip = xrip
+	} else if clientIP := r.Header.Get(trueClientIP); clientIP != "" {
+		ip = clientIP
+	} else if clientIP := r.Header.Get(cfConnectingIP); clientIP != "" {
+		ip = clientIP
+	} else if xff := r.Header.Get(xForwardedFor); xff != "" {
+		i := strings.Index(xff, ", ")
+		if i == -1 {
+			i = len(xff)
+		}
+		ip = strings.TrimSpace(xff[:i])
+	}
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+
+	return ip
+}
+
+// ParseAllowedIPAndRanges returns a list of functions that allow to find if a
+func ParseAllowedIPAndRanges(allowed []string) ([]func(net.IP) bool, error) {
+	res := make([]func(net.IP) bool, len(allowed))
+	for i, allowFrom := range allowed {
+		if strings.LastIndex(allowFrom, "/") > 0 {
+			_, ipRange, err := net.ParseCIDR(allowFrom)
+			if err != nil {
+				return nil, fmt.Errorf("given string %q is not a valid IP range: %v", allowFrom, err)
+			}
+
+			res[i] = ipRange.Contains
+		} else {
+			allowed := net.ParseIP(allowFrom)
+			if allowed == nil {
+				return nil, fmt.Errorf("given string %q is not a valid IP address", allowFrom)
+			}
+
+			res[i] = allowed.Equal
+		}
+	}
+
+	return res, nil
+}
+
+// GetRedactedURL returns the url redacting the password if any
+func GetRedactedURL(rawurl string) string {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return rawurl
+	}
+	return u.Redacted()
 }
