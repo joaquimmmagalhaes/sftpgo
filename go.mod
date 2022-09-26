@@ -12,7 +12,7 @@ require (
 	github.com/cockroachdb/cockroach-go/v2 v2.1.1
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf // indirect
 	github.com/eikenb/pipeat v0.0.0-20210528001815-f1fcb2512a3a
-	github.com/fclairamb/ftpserverlib v0.13.1
+	github.com/fclairamb/ftpserverlib v0.20.0
 	github.com/frankban/quicktest v1.13.0 // indirect
 	github.com/go-chi/chi/v5 v5.0.3
 	github.com/go-chi/jwtauth/v5 v5.0.1
@@ -37,37 +37,35 @@ require (
 	github.com/otiai10/copy v1.6.0
 	github.com/pelletier/go-toml v1.9.1 // indirect
 	github.com/pires/go-proxyproto v0.5.0
-	github.com/pkg/sftp v1.13.0
+	github.com/pkg/sftp v1.13.1
 	github.com/prometheus/client_golang v1.10.0
 	github.com/prometheus/common v0.25.0 // indirect
 	github.com/rs/cors v1.7.1-0.20200626170627-8b4a00bd362b
 	github.com/rs/xid v1.3.0
-	github.com/rs/zerolog v1.22.0
+	github.com/rs/zerolog v1.27.0
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shirou/gopsutil/v3 v3.21.4
-	github.com/spf13/afero v1.6.0
+	github.com/spf13/afero v1.9.2
 	github.com/spf13/cast v1.3.1 // indirect
 	github.com/spf13/cobra v1.1.3
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/viper v1.7.1
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.8.0
 	github.com/studio-b12/gowebdav v0.0.0-20210427212133-86f8378cf140
 	github.com/yl2chen/cidranger v1.0.2
 	go.etcd.io/bbolt v1.3.5
 	go.uber.org/automaxprocs v1.4.0
 	gocloud.dev v0.23.0
 	gocloud.dev/secrets/hashivault v0.23.0
-	golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a
+	golang.org/x/crypto v0.0.0-20211108221036-ceb1ce70b4fa
 	golang.org/x/net v0.0.0-20210525063256-abc453219eb5
-	golang.org/x/sys v0.0.0-20210525143221-35b2ab0089ea
+	golang.org/x/sys v0.0.0-20220919091848-fb04ddd9f9c8
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
-	golang.org/x/tools v0.1.2 // indirect
 	google.golang.org/api v0.47.0
 	google.golang.org/genproto v0.0.0-20210524171403-669157292da3 // indirect
 	google.golang.org/grpc v1.38.0 // indirect
 	gopkg.in/ini.v1 v1.62.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 )
 
 replace (
